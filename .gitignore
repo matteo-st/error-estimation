@@ -170,3 +170,7 @@ results/
 tensors/
 images/
 *.pt
+nohup.out
+data/
+myenv/
+code/

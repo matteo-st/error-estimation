@@ -144,6 +144,7 @@ def main(temperature, magnitude):
     # get train probs
     method = get_method(args.method, temperature=temperature, model=model, lbd=args.lbd, num_classes=num_classes)
     method.fit(train_dataloader, val_dataloader)
+    method.save_results("tensors/your_model_conformal_results.npz")
 
     test_preds, test_targets, test_scores = [], [], []
     for inputs, targets in tqdm(test_dataloader, total=len(test_dataloader)):
