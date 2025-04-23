@@ -93,7 +93,10 @@ def main(config):
     # randomly permutate dataset
     indices = list(range(len(dataset)))
     random.shuffle(indices)
+    print("datset type", type(dataset))
     dataset = torch.utils.data.Subset(dataset, indices)
+    print("datset type", type(dataset))
+    exit()
 
     # Data Preparation
     config.num_classes = {"cifar10": 10, "svhn": 10, "cifar100": 100, "imagenet": 1000}[config.dataset]
@@ -150,6 +153,7 @@ def main(config):
         test_preds, test_targets, test_scores = method.evaluate(test_dataloader, name_save_file = f"test_fold{fold}")
         evaluate_classification(test_preds, test_targets, test_scores, config.results_folder, name_save_file = f"test_fold{fold}")
 
+
     print("End of main()")
     return 
 
@@ -162,8 +166,10 @@ if __name__ == "__main__":
 
     with open(config_path, "r") as f:
         config = json.load(f)
-
+    
     config["results_folder"] = experiment_folder
     # config = Config(**config_dict)
+ 
     config = Namespace(**config)
+
     main(config)

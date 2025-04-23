@@ -77,6 +77,16 @@ def get_classification_metrics(preds, targets, scores):
     # preds = preds.view(-1).detach().cpu().numpy()
 
     # Dataset Information
+    def ensure_numpy(x):
+        # If already a numpy array, return it unchanged.
+        if isinstance(x, np.ndarray):
+            return x
+        # Otherwise assume it's a tensor with the necessary methods.
+        return x.view(-1).detach().cpu().numpy()
+    
+    preds = ensure_numpy(preds)
+    targets = ensure_numpy(targets)
+    scores = ensure_numpy(scores)
     n_samples = len(targets)
     unique_classes, counts = np.unique(targets, return_counts=True)
     n_classes = len(unique_classes)
@@ -96,8 +106,11 @@ def get_classification_metrics(preds, targets, scores):
     fprs, tprs, thrs = roc_curve(train_labels, scores)
     roc_auc = auc(fprs, tprs)
 
+
     # Compute FPR at a fixed TPR (here, 0.95)
     fpr_val, tpr_val, thr_val = fpr_at_fixed_tpr(fprs, tprs, thrs, 0.95)
+    n_negatif = np.sum(train_labels == 0)
+    var_fpr = fpr_val * (1 - fpr_val) / n_negatif
     
     # Compute risks and coverages for selective net metrics
     risks, coverages, _ = risks_coverages_selective_net(scores, preds, targets)
@@ -143,16 +156,17 @@ def get_classification_metrics(preds, targets, scores):
     plt.legend(loc="lower right")
     plt.show()
     
-    return model_acc, roc_auc, fpr_val, tpr_val, aurc
+    return model_acc, roc_auc, fpr_val, var_fpr, tpr_val, aurc
 
 
 
-def evaluate_classification(preds, targets, scores, results_folder, name_save_file):
+def evaluate_classification(preds, targets, scores, results_folder=None, name_save_file=None, save=True):
 
-    model_acc, roc_auc, fpr, tpr, aurc = get_classification_metrics(preds, targets, scores)
+    model_acc, roc_auc, fpr, var_fpr, tpr, aurc = get_classification_metrics(preds, targets, scores)
     results = {
         "accuracy": model_acc,
         "fpr": fpr,
+        "var_fpr" : var_fpr,
         "tpr": tpr,
         "auc": roc_auc,
         "aurc": aurc,

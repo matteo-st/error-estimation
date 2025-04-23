@@ -167,6 +167,9 @@ cluster/
 .vscode/
 **slurm*
 results/
+synth_results/
+synthetic_data
+synthetic_results
 tensors/
 images/
 *.pt

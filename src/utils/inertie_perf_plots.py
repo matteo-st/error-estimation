@@ -124,23 +124,52 @@ def get_fpr(exp_folder, fold):
 def get_final_kmeans_loss(exp_folder, fold):
     """
     Loads the k-means loss history CSV from exp_folder and returns the final kmeans_loss value.
-    It expects a CSV file named 'train_fold{fold}_kmeans_loss_history.csv' with columns "outer_iteration" and "kmeans_loss".
+    It first looks for a CSV file named 'train_fold{fold}_kmeans_loss_history.csv' with columns
+    "outer_iteration" and "kmeans_loss". If that file is not found, it looks for a file named
+    'train_fold{fold}_cluster_inertia.csv', which is expected to contain a single inertia value.
+    
+    Args:
+        exp_folder (str): Path to the experiment folder.
+        fold (str): The fold number as a string.
+        
+    Returns:
+        The final k-means loss (inertia) value, or None if no valid file is found.
     """
+    # First try the kmeans loss history file.
     kmeans_csv_path = os.path.join(exp_folder, f"train_fold{fold}_kmeans_loss_history.csv")
-    if not os.path.exists(kmeans_csv_path):
-        print(f"{kmeans_csv_path} not found in {exp_folder}")
-        return None
-    try:
-        df = pd.read_csv(kmeans_csv_path)
-        if df.empty:
+    if os.path.exists(kmeans_csv_path):
+        try:
+            df = pd.read_csv(kmeans_csv_path)
+            if df.empty:
+                return None
+            # Ensure data is sorted by outer_iteration and take the last kmeans_loss value.
+            df_sorted = df.sort_values(by="outer_iteration")
+            final_loss = df_sorted.iloc[-1]["kmeans_loss"]
+            return final_loss
+        except Exception as e:
+            print(f"Error reading {kmeans_csv_path}: {e}")
             return None
-        # Ensure data is sorted by outer_iteration and take the last kmeans_loss value.
-        df_sorted = df.sort_values(by="outer_iteration")
-        final_loss = df_sorted.iloc[-1]["kmeans_loss"]
-        return final_loss
-    except Exception as e:
-        print(f"Error reading {kmeans_csv_path}: {e}")
-        return None
+    else:
+        print(f"{kmeans_csv_path} not found in {exp_folder}.")
+    
+    # If the first file is not found, try the cluster inertia file.
+    inertia_csv_path = os.path.join(exp_folder, f"train_fold{fold}_cluster_inertia.csv")
+    if os.path.exists(inertia_csv_path):
+        try:
+            # Assuming the file contains a single value; we read without headers.
+            df = pd.read_csv(inertia_csv_path, header=None)
+            if df.empty:
+                return None
+            final_loss = df.iloc[1, 0]
+            print("final loss", final_loss)
+            return final_loss
+        except Exception as e:
+            print(f"Error reading {inertia_csv_path}: {e}")
+            return None
+    else:
+        print(f"{inertia_csv_path} not found in {exp_folder}.")
+    
+    return None
 
 def plot_fpr_vs_kmeans_loss(exp_folders, fold, save_folder, free_param):
     """
@@ -236,7 +265,7 @@ def main():
         "model_name": "resnet34",
         "dataset": "cifar10",
         "style": "ce",
-        "temperature": 100,
+        "temperature": 260,
         "magnitude": 0,
         "method": "conformal",
         "batch_size_train": 64,
@@ -244,17 +273,18 @@ def main():
         "split_ratio": 1.5,
         "seed": 1,
         "lbd": 0.5,
-        "clustering_method": "kmeans_grad",
+        "clustering_method": "kmeans",
         "init_scheme": "random",
-        "f_divergence": "kl",
-        # "kmeans_seed": 10,
+        "f_divergence": "eucli",
+        "kmeans_seed": 10,
         "kmens_n_iter": 50,
-        # "grad_n_iters": 130,
-        "grad_lr": 0.1,
-        "n_cluster": 150,
+        "grad_n_iters": 130,
+        "grad_lr": 0.05,
+        "n_cluster": 170,
         "clustering_space": "probs",
         "alpha": 0.05,
-        "n_folds": 4
+        "n_folds": 4,
+        "cross_val": "stratify"
         }
     # Remove the free parameter (if present) from the fixed parameters.
     fixed_params.pop(args.free_param, None)

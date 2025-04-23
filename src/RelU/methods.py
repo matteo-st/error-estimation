@@ -6,7 +6,8 @@ import torch.nn.functional as F
 from torchvision.models.feature_extraction import create_feature_extractor
 from tqdm import tqdm
 import copy
-from src.utils.eval import evaluate_classification
+from src.utils.eval import evaluate_classification, get_classification_metrics
+from synthetic_code.utils.dataset import load_data_config, load_generating_params, bayes_proba
 import numpy as np
 import pandas as pd
 from torch.autograd import Variable
@@ -55,6 +56,41 @@ def add_dropout_layer(model, dropout_p=0.5):
     # add the last layer
     model.linear.add_module("linear", last_layer)
 
+
+class BayesDetector:
+    def __init__(self, model, dataset, *args, **kwargs):
+        self.model = model
+        self.device = next(model.parameters()).device
+        self.dataset = dataset
+        self.dim = dataset["dim"]
+        self.num_classes = dataset["num_classes"]
+        self.data_folder = f"data/synthetic/dim-{self.dim}_classes-{self.num_classes}"
+        self.means, self.stds = load_generating_params(self.data_folder)
+
+    def evaluate(self, dataloader: torch.utils.data.DataLoader, name_save_file: str = "test"):
+        self.model.eval()
+        test_preds, test_targets, test_scores = [], [], []
+        
+        with torch.no_grad():
+            for inputs, targets in tqdm(dataloader, total=len(dataloader), desc="Evaluating"):
+                inputs = inputs.to(self.device)
+                logits = self.model(inputs)
+                preds = torch.argmax(logits, dim=1)
+                data_cond_probs = bayes_proba(inputs.cpu().numpy(), self.means, self.stds)
+                scores = 1 - data_cond_probs[np.arange(len(inputs)), preds.cpu().numpy()]
+        
+                test_preds.append(preds.cpu().numpy())
+                test_targets.append(targets.cpu().numpy())
+                test_scores.append(scores)
+
+            test_preds = np.concat(test_preds, axis=0)
+            test_targets = np.concat(test_targets, axis=0)
+            test_scores = np.concat(test_scores, axis=0)
+
+        return test_preds, test_targets, test_scores
+
+   
+        
 
 class MetricLearningLagrange:
     def __init__(self, model, lbd=0.5, temperature=1, **kwargs):
@@ -142,6 +178,7 @@ class MLPTrainer:
     def __init__(self, model, num_classes, epochs=100, hidden_size=128, num_hidden_layers=2, *args, **kwargs) -> None:
         self.model = model
         self.device = next(model.parameters()).device
+        print("num_classes", num_classes)
         self.net = MLP(num_classes, hidden_size, num_hidden_layers)
         self.net = self.net.to(self.device)
         self.criterion = torch.nn.BCELoss()
@@ -192,7 +229,8 @@ class MLPTrainer:
             targets = torch.cat(targets)
             scores = torch.cat(scores)
             preds = torch.cat(preds)
-            acc, roc_auc, fpr, aurc = evaluate_classification(preds, targets, scores)
+            acc, roc_auc, fpr, var, tpr, aurc = get_classification_metrics(preds, targets, scores)
+            print
             # if acc > best_acc:
             #     best_acc = acc
             #     best_weights = copy.deepcopy(self.net.to("cpu").state_dict())
@@ -318,6 +356,7 @@ class EmbeddingKMeans:
                 self.feature_extractor = lambda x: feature_extractor(x)["clustering_space"]
             else:
                 raise ValueError(f"Nodes registry is not implemented for model {model}")
+
         self.clustering = None
         self.centroids = None
 
@@ -482,7 +521,7 @@ class EmbeddingKMeans:
         df.to_csv(file_path, index=False)
         print(f"KMeans loss history saved to {file_path}")
 
-    def fit(self, train_dataloader: torch.utils.data.DataLoader, *args, name_save_file: str = "train", save_tensors: bool = True, **kwargs) -> None:
+    def fit(self, train_dataloader: torch.utils.data.DataLoader, *args, name_save_file: str = "train", save_tensors: bool = False, **kwargs) -> None:
         """
         Extracts embeddings from the training dataloader, performs clustering according to the selected method,
         computes cluster-level error metrics, and saves the results.
@@ -522,7 +561,8 @@ class EmbeddingKMeans:
         errors = np.concatenate(errors_list, axis=0)
         
         if self.clustering_method == "kmeans":
-            self.clustering = KMeans(n_clusters=self.n_cluster, random_state=42)
+            # random_state = 42
+            self.clustering = KMeans(n_clusters=self.n_cluster, random_state=self.kmeans_seed, init=self.init_scheme, verbose=0)
             clusters = self.clustering.fit_predict(embs)
         elif self.clustering_method == "kmeans_grad":
             clusters, centroids = self._custom_kmeans(embs)
@@ -577,9 +617,14 @@ class EmbeddingKMeans:
         else:
             results_df.to_csv(csv_path, mode="a", index=False, header=False)
         print(f"Cluster evaluation results saved to {csv_path}")
+
+        # Save Inertie
+        csv_path = os.path.join(self.results_folder, name_save_file + "_cluster_inertia.csv") 
+        pd.DataFrame({"inertie" : [self.clustering.inertia_]}).to_csv(csv_path, index=False, header=True)
+
         return 
 
-    def evaluate(self, dataloader: torch.utils.data.DataLoader, name_save_file: str = "test", evaluate_clusters: bool = True, save_tensors: bool = True):
+    def evaluate(self, dataloader: torch.utils.data.DataLoader, name_save_file: str = "test", evaluate_clusters: bool = True, save_tensors: bool = False):
         self.model.eval()
         embs_list, clusters_list, scores_list = [], [], []
         preds_list, targets_list, errors_list = [], [], []
@@ -1043,11 +1088,13 @@ def get_method(method_name: str, model, *args, **kwargs) -> Wrapper:
     if method_name == "metric_lagrange":
         return Wrapper(MetricLearningLagrange(*args, **kwargs))
     if method_name == "mlp":
-        return Wrapper(MLPTrainer(*args, **kwargs))
+        return Wrapper(MLPTrainer(model, kwargs["dataset"]["num_classes"], *args, **kwargs), model)
     if method_name == "mc_dropout":
         return Wrapper(entropy)
     if method_name == "ensemble":
         return Wrapper(msp)
+    if method_name == "bayes":
+        return Wrapper(BayesDetector(model, *args, **kwargs), model)
     elif method_name == "conformal":
         return Wrapper(EmbeddingKMeans(model, *args, **kwargs), model)
     raise ValueError(f"Method {method_name} not supported")
