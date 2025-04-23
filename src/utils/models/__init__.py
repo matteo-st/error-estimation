@@ -256,7 +256,8 @@ models_registry = {
 }
 
 
-def get_model_essentials(model_name, features_nodes=None) -> Dict[str, Any]:
+def get_model_essentials(model, dataset, features_nodes=None) -> Dict[str, Any]:
+    model_name = "_".join([model, dataset])
     if model_name not in models_registry:
         raise ValueError("Unknown model name: {}".format(model_name))
     return models_registry[model_name](features_nodes=features_nodes)

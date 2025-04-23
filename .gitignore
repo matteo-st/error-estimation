@@ -167,6 +167,13 @@ cluster/
 .vscode/
 **slurm*
 results/
+synth_results/
+synthetic_data
+synthetic_results
 tensors/
 images/
 *.pt
+nohup.out
+data/
+myenv/
+code/

@@ -1,0 +1,16 @@
+{
+    "model_name": "mlp",
+    "dataset": "synthetic",
+    "dim":2,
+    "classes" :3,
+    "temperature": 1,
+    "magnitude": 0,
+    "method": "conformal",
+    "batch_size_train": 64,
+    "batch_size_test": 64,
+    "seed": 42,
+    "clustering_method": "uniform",
+    "n_cluster": 170,
+    "clustering_space": "estimate",
+    "alpha": 0.05,
+  }
