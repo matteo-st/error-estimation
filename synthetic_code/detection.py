@@ -3,6 +3,7 @@ import json
 import torch
 from torch.utils.data import  DataLoader
 from torch.distributions import MultivariateNormal, Categorical
+from torchvision.models.feature_extraction import create_feature_extractor
 from synthetic_code.utils.model import BayesClassifier, MLPClassifier
 from synthetic_code.utils.detector import BayesDetector, GiniDetector
 from synthetic_code.utils.dataset import GaussianMixtureDataset
@@ -13,6 +14,7 @@ from sklearn.cluster import KMeans
 from sklearn.mixture import GaussianMixture
 from time import localtime, strftime
 import pandas as pd
+import joblib
 CHECKPOINTS_DIR_BASE = os.environ.get("CHECKPOINTS_DIR", "checkpoints/")
 
 
@@ -29,7 +31,8 @@ def create_experiment_folder(config, results_dir = "synth_results/asymp_exp"):
     os.makedirs(results_dir, exist_ok=True)
     # Create a unique folder name based on the current date and time
     timestamp = strftime("%Y-%m-%d_%H-%M-%S", localtime())
-    config["experiment_datetime"] = timestamp
+    config["experiment"] = {}
+    config["experiment"]["datetime"] = timestamp
 
     # Liste des dossiers d'expériences existants
     existing = [
@@ -46,7 +49,7 @@ def create_experiment_folder(config, results_dir = "synth_results/asymp_exp"):
             continue
     new_number = max(numbers) + 1 if numbers else 1
     experiment_number = f"experiment_{new_number}"
-    config["experiment_folder"] = experiment_number
+    config["experiment"]["folder"] = experiment_number
     experiment_folder = os.path.join(results_dir, experiment_number)
     os.makedirs(experiment_folder, exist_ok=True)
     
@@ -72,7 +75,7 @@ class PartitionDetector:
             self, model, weights, means, stds,
             n_cluster=100, alpha=0.05, method="uniform", device=torch.device('cpu'),
             n_classes=7, kmeans_seed=0, init_scheme="k-means++", # "random" or "k-means++",
-            partionning_space="true_proba_error", temperature=1.0
+            partionning_space="true_proba_error", temperature=1.0, cov_type = None
             ):
         """
         Args:
@@ -99,6 +102,7 @@ class PartitionDetector:
         self.kmeans_seed = kmeans_seed
         self.init_scheme = init_scheme
         self.partionning_space = partionning_space
+        self.cov_type = cov_type
         self.temperature = temperature
 
         # Initilize the density function
@@ -117,6 +121,11 @@ class PartitionDetector:
             self.clustering_algo = KMeans(n_clusters=self.n_cluster, 
                                           random_state=self.kmeans_seed, 
                                           init=self.init_scheme, verbose=0)
+        elif self.method == "soft-kmeans":
+            self.clustering_algo = GaussianMixture(n_components=self.n_cluster, 
+                                                   random_state=self.kmeans_seed, 
+                                                   covariance_type=self.cov_type, 
+                                                   init_params=self.init_scheme)
             
         
         # Initialize Feature extractor
@@ -124,6 +133,9 @@ class PartitionDetector:
             self.feature_extractor = lambda x: gini(self.model(x)[0], temperature=self.temperature)
         elif self.partionning_space == "true_proba_error":
             self.feature_extractor = lambda x: self.func_proba_error(x)
+        else: 
+            self.extractor = create_feature_extractor(self.model, {partionning_space : partionning_space})
+            self.feature_extractor = lambda x: self.extractor(x)[partionning_space]
     
     def func_proba_error(self, x):
         """
@@ -158,7 +170,7 @@ class PartitionDetector:
             # Handle edge case when proba_error == 1
             cluster[cluster == self.n_cluster] = self.n_cluster - 1
             return cluster
-        elif self.method == "kmeans":
+        elif self.method in ["kmeans", "soft-kmeans"]:
             embs = self.feature_extractor(x)
             cluster = torch.tensor(self.clustering_algo.predict(embs.cpu().numpy()), 
                                    device=self.device)
@@ -188,7 +200,7 @@ class PartitionDetector:
                 if self.method == "uniform":
                     clusters = self.predict_clusters(inputs)
                     all_clusters.append(clusters)
-                elif self.method == "kmeans":
+                elif self.method in ["kmeans", "soft-kmeans"]:
                     embs = self.feature_extractor(inputs)
                     all_embs.append(embs)
 
@@ -204,6 +216,12 @@ class PartitionDetector:
             clusters = self.clustering_algo.fit_predict(all_embs.cpu().numpy())
             clusters = torch.tensor(clusters, device=self.device)
             self.inertia = self.clustering_algo.inertia_
+        elif self.method == "soft-kmeans":
+            all_embs = torch.cat(all_embs, dim=0)
+            clusters = self.clustering_algo.fit_predict(all_embs.cpu().numpy())
+            clusters = torch.tensor(clusters, device=self.device)
+            self.inertia = self.clustering_algo.lower_bound_
+            
         
         detector_labels = torch.cat(all_detector_labels, dim=0)
         
@@ -264,7 +282,7 @@ class PartitionDetector:
     
 
 class DetectorEvaluator:
-    def __init__(self, model, dataloader, device):
+    def __init__(self, model, dataloader, device, return_embs=False):
         """
         Evaluator for measuring model accuracy.
         
@@ -276,6 +294,7 @@ class DetectorEvaluator:
         self.model = model.to(device)
         self.dataloader = dataloader
         self.device = device
+        self.return_embs = return_embs
 
     def fpr_at_fixed_tpr(self, fprs, tprs, thresholds, tpr_level: float = 0.95):
         
@@ -325,8 +344,13 @@ class DetectorEvaluator:
         all_embs = np.concatenate(all_embs, axis=0)
 
         fprs, tprs, thrs = roc_curve(all_detector_labels, all_detector_preds)
+        # Compute the area under the ROC curve
         fpr, tpr, thr = self.fpr_at_fixed_tpr(fprs, tprs, thrs, 0.95)
-        return fpr, tpr, thr, all_detector_preds, all_detector_labels, all_clusters, all_embs
+        if self.return_embs:
+            return fpr, tpr, thr, all_detector_preds, all_detector_labels, all_clusters, all_embs
+        else:
+            return fpr, tpr, thr, all_detector_preds, all_detector_labels, all_clusters, [None] * len(all_embs)
+        
 
 def main(config):
 
@@ -356,6 +380,19 @@ def main(config):
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     model.load_state_dict(checkpoint)
 
+    # from torchvision.models.feature_extraction import get_graph_node_names
+
+    # # assume `model` is your nn.Module
+    # train_nodes, eval_nodes = get_graph_node_names(model)
+
+    # print("Nodes when traced in train() mode:")
+    # for n in train_nodes:
+    #     print("  ", n)
+
+    # print("\nNodes when traced in eval() mode:")
+    # for n in eval_nodes:
+    #     print("  ", n)
+    # return
     # Load the Dataset parameters
     means = torch.tensor(config_model["means"]).to(device)
     stds = torch.tensor(config_model["stds"]).to(device)
@@ -363,36 +400,54 @@ def main(config):
 
     # Generate Dataset
         # Create training and validation datasets.
-    train_dataset = GaussianMixtureDataset(config["n_samples_train"], means, stds, weights, seed=config["seed_train"])
-    val_dataset = GaussianMixtureDataset(config["n_samples_test"], means, stds, weights, seed=config["seed_test"])
+    train_dataset = GaussianMixtureDataset(config["data"]["n_samples_train"], means, stds, weights, seed=config["data"]["seed_train"])
+    val_dataset = GaussianMixtureDataset(config["data"]["n_samples_test"], means, stds, weights, seed=config["data"]["seed_test"])
     
     # Create DataLoaders.
-    train_loader = DataLoader(train_dataset, batch_size=config["batch_size_train"], shuffle=True)  # Each batch: [32, 10]
-    val_loader = DataLoader(val_dataset, batch_size=config["batch_size_test"], shuffle=False)       # Each batch: [32, 10]
+    train_loader = DataLoader(train_dataset, batch_size=config["data"]["batch_size_train"], shuffle=True)  # Each batch: [32, 10]
+    val_loader = DataLoader(val_dataset, batch_size=config["data"]["batch_size_test"], shuffle=False)       # Each batch: [32, 10]
 
     
 
     detector = PartitionDetector(model, weights, means, stds, 
-                                 n_cluster=config["n_clusters"], alpha=0.05, 
-                                 method=config["method"], 
+                                 n_cluster=config["clustering"]["n_clusters"], alpha=0.05, 
+                                 method=config["clustering"]["name"], 
                                  device=device, 
-                                 kmeans_seed=config["kmeans_seed"], 
+                                 kmeans_seed=config["clustering"]["seed"], 
                                 #  init_scheme=config["k-means++"],
                                 #  temperature=config["temperature"],
-                                 partionning_space=config["partionning_space"]
+                                 partionning_space=config["clustering"]["space"],
+                                #  cov_type=config["clustering"]["cov_type"]
                                  )
     detector.fit(train_loader)
     # detector = GiniDetector(model, temperature=config["temperature"], normalize = config["normalize_gini"], device=device)
     # detector = BayesDetector(model, weights, means, stds, config_model["n_classes"], device=device)
+    # print("converged ?", detector.clustering_algo.converged_)
+   
+    if config["clustering"]["name"] == "soft-kmeans":
+        # with open(os.path.join(experiment_folder, 'clustering_algo.pkl'), "wb") as f:
+        #     pickle.dump(detector.clustering_algo, f)
+        joblib.dump(detector.clustering_algo, os.path.join(experiment_folder, 'clustering_algo.pkl'))
+    # Save the clustering algorithm
 
-    if config["method"] == "kmeans":
+    if config["clustering"]["name"] == "kmeans":
+        cluster_center =  detector.clustering_algo.cluster_centers_.flatten()
+        # sort_permut = np.argsort(cluster_center)
+        # print("sort_permut", sort_permut)
 
-        df_cluster_centers = pd.DataFrame({"centers": detector.clustering_algo.cluster_centers_.flatten()}).reset_index().rename(columns={"index": "cluster"})
+        # cluster_center_sorted = cluster_center[sort_permut]
+        # cluster_intervals_sorted = np.array(detector.cluster_intervals)[sort_permut]
+        df_cluster_centers = pd.DataFrame({"centers": cluster_center}).reset_index().rename(columns={"index": "cluster"})
         df_cluster_centers.sort_values(by="centers", ascending=True, inplace=True)
+        
+        # print("cluster centers", cluster_center_sorted)
+        # print("boundary clusters", (cluster_center_sorted[1:] + cluster_center_sorted[:-1]) / 2)
+        # print("cluster intervals", cluster_intervals_sorted)
+        
         df_cluster_centers.to_csv(os.path.join(experiment_folder, "cluster_centers.csv"), index=False)
 
 
-    evaluator_train = DetectorEvaluator(model, train_loader, device)
+    evaluator_train = DetectorEvaluator(model, train_loader, device, return_embs=return_embs)
     fpr_train, tpr_train, thr_train, train_detector_preds, train_detector_labels, train_clusters, train_embs = evaluator_train.evaluate(detector)
 
     df_train_detection = pd.DataFrame({
@@ -409,9 +464,9 @@ def main(config):
     print("TPR at TPR=0.95:", tpr_train)
     print("Threshold at TPR=0.95:", thr_train)
     
-    evaluator_val = DetectorEvaluator(model, val_loader, device)
+    evaluator_val = DetectorEvaluator(model, val_loader, device, return_embs=return_embs)
     fpr_val, tpr_val, thr_val, val_detector_preds, val_detector_labels, val_clusters, val_embs = evaluator_val.evaluate(detector)
-
+    print("metric", fpr_val, tpr_val, thr_val)
 
     df_val_detection = pd.DataFrame({
         "embs": val_embs,
@@ -439,88 +494,67 @@ def main(config):
 
 
 if __name__ == "__main__":
-    # config = {
-    #     "n_samples_train" : 1000,
-    #     "n_samples_test" : 100000,
-    #     "batch_size_train" : 100000,
-    #     "batch_size_test" : 100000,
-    #     "n_clusters" : 2,
-    #     "method" : "kmeans",
-    #     "seed_train" : 4,
-    #     "seed_test" : -1,
-    #     "kmeans_seed" : 0,
-    #     "partionning_space" : "true_proba_error",
-    #     # "temperature" : 1,
-    #     # "normalize_gini" : False,
-    #     "init_scheme" : "k-means++",
-    #     "clustering_algo" : {
-    #         "name" : "soft-kmeans",
-    #         "n_clusters" : 100,
-    #         "seed" : 0,
 
-    #     }
-    #     }
     config = {
-        "data" : {"n_samples_train" : 1000,
+        "data" : {"n_samples_train" : 10000,
                   "n_samples_test" : 100000,
                   "batch_size_train" : 100000,
                   "batch_size_test" : 100000,
-                  "seed_train" : 4,
+                  "seed_train" : 1,
                   "seed_test" : -1
                   },
-        "clustering_algo" : {
-            "name" : "soft-kmeans",
-            "n_clusters" : 2,
+        "clustering" : {
+            "name" : "kmeans",
+            "n_clusters" : 10,
             "seed" : 0,
             "init_scheme" : "k-means++",
-            "space" : "true_proba_error",
+            "space" : "softmax",
+            # "cov_type" : "spherical"
             # "temperature" : 1,
             # "normalize_gini" : False
             }
         }
-    # for n_clusters in range(10, 1000, 20):
-    #     for n_samples_train in range(100, 50000, 500):
-    # for kmeans_seed in range(1, 5):
-    for n_samples_train in range(1000, 10000, 1000):
-        for seed_train in range(1, 5):
-            print("seed_train", seed_train)
-            config["seed_train"] = seed_train
-
-                # config["n_clusters"] = n_clusters
-                # config["n_samples_train"] = n_samples_train
-                # config["kmeans_seed"] = kmeans_seed
-                # print("kmeans_seed", kmeans_seed)
-                # print("n_clusters", n_clusters)
-    # for n_clusters in [50, 100]:
-    #     for n_samples_train in range(1000, 10000, 500):
-    #         for seed_train in range(1, 5):
-                # for seed_test in range(-10,0):
-            print("n_samples_train", n_samples_train)
-            config["n_samples_train"] = n_samples_train
-                # print("n_clusters", n_clusters)
-                # print("n_samples_train", n_samples_train)
-                
-                # # config["seed_test"] = seed_test
-                # config["n_clusters"] = n_clusters
-                # config["n_samples_train"] = n_samples_train
-    # for temperature in [0.8, 0.9, 1]:
-    #     for normalize_gini in [True, False]:
-    #         print("temperature", temperature)
-    #         print("normalize_gini", normalize_gini)
-    #         # for n_samples_train in range(1000, 10000, 500):
-            # config["temperature"] = temperature
-            # config["normalize_gini"] = normalize_gini
-
-                # Create the experiment folder
     
-            experiment_folder, experiment_number = create_experiment_folder(config)
+    return_embs = False
+
+    for n_clusters in [50, 100, 200, 400, 500]:
+        for n_samples_train in range(10000, 30000, 1000):
+            for seed_train in range(5):
+                print("seed_train", seed_train)
+                config["data"]["seed_train"] = seed_train
+                print("n_samples_train", n_samples_train)
+                config["data"]["n_samples_train"] = n_samples_train
+                print("n_clusters", n_clusters)
+                config["clustering"]["n_clusters"] = n_clusters
+                experiment_folder, experiment_number = create_experiment_folder(config)
+                main(config)
+  
     
-
-
-                # torch.manual_seed(config["seed"])
-                # torch.cuda.manual_seed(config["seed"])
-                # torch.backends.cudnn.deterministic = True
-
-            main(config)
-
-
+    for clustering_space in ["layer0", "relu", "dropout", 
+                             "hidden_layers.0.0", "hidden_layers.0.1", "hidden_layers.0.2",
+                             "hidden_layers.1.0", "hidden_layers.1.1", "hidden_layers.1.2",
+                             "classifier"]:    
+        for n_clusters in [50, 100, 200, 400, 500]:
+            for n_samples_train in range(1000, 30000, 1000):
+                for seed_train in range(5):
+                    print("seed_train", seed_train)
+                    config["data"]["seed_train"] = seed_train
+                    print("n_samples_train", n_samples_train)
+                    config["data"]["n_samples_train"] = n_samples_train
+                    print("n_clusters", n_clusters)
+                    config["clustering"]["n_clusters"] = n_clusters
+                    print("clustering_space", clustering_space)
+                    config["clustering"]["space"] = clustering_space
+                    experiment_folder, experiment_number = create_experiment_folder(config)
+                    main(config)
+            
+        # for n_samples_train in range(1000, 30000, 1000):
+        #     for seed_train in range(1, 10):
+        #         print("seed_train", seed_train)
+        #         config["data"]["seed_train"] = seed_train
+        #         print("n_samples_train", n_samples_train)
+        #         config["data"]["n_samples_train"] = n_samples_train
+        #         print("n_clusters", n_clusters)
+        #         config["clustering"]["n_clusters"] = n_clusters
+        #         experiment_folder, experiment_number = create_experiment_folder(config)
+        #         main(config)
