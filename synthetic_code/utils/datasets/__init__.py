@@ -4,7 +4,10 @@ import json
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Subset
+
+DATA_DIR = os.environ.get("DATA_DIR", "./data")
+CHECKPOINTS_DIR_BASE = os.environ.get("CHECKPOINTS_DIR", "checkpoints/")
 
 
 # -------------------------------
@@ -136,7 +139,10 @@ import numpy as np
 import os
 import torch
 from torch.utils.data import Dataset, TensorDataset
-from torchvision.datasets import CIFAR10, CIFAR100, SVHN, ImageFolder, ImageNet
+from torchvision.datasets import CIFAR10, CIFAR100, SVHN, ImageNet
+
+from synthetic_code.utils.models import get_model_essentials
+
 
 datasets_registry: Dict[str, Any] = {
     "cifar10": CIFAR10,
@@ -146,37 +152,64 @@ datasets_registry: Dict[str, Any] = {
 }
 
 
-def get_dataset(dataset_name: str, root: str, **kwargs) -> Dataset:
+def get_synthetic_dataset(model_name: str, # to get the test transform
+                 checkpoint_dir: str = os.path.join(CHECKPOINTS_DIR_BASE, "ce"),
+                 n_samples_train = 1000,
+                n_samples_test = 1000,
+                 seed_train: int = 0,
+                 seed_test: int = 1,
+                 device: str = "cpu",
+                 **kwargs) -> Dataset:
+    
+    checkpoints_dir = os.path.join(checkpoints_dir, model_name)
+    config_model_path = os.path.join(checkpoints_dir, "config.json")
 
-    if dataset_name["name"] == "synthetic":
-        # base_dir = os.path.join(root, f"synthetic/dim-{dataset_name['dim']}_classes-{dataset_name['classes']}")
+    if not os.path.exists(config_model_path):
+        raise FileNotFoundError(f"Configuration file not found at {config_model_path}")
+    # Load the configuration file
+    with open(config_model_path, "r") as f:
+        config_model = json.load(f)
 
-        train_path = os.path.join(root, "train_detector_dataset.npz")
-        concentration_path = os.path.join(root, "concentration_dataset.npz")
-        test_path = os.path.join(root, "test_dataset.npz")
+    means = torch.tensor(config_model["means"]).to(device)
+    stds = torch.tensor(config_model["stds"]).to(device)
+    weights = torch.tensor(config_model["weights"]).to(device)
 
-        train_npz = np.load(train_path)
-        concentration_npz = np.load(concentration_path)
-        test_npz = np.load(test_path)
+    # Generate Dataset
+        # Create training and validation datasets.
+    train_dataset = GaussianMixtureDataset(n_samples_train, means, stds, weights, seed=seed_train)
+    val_dataset = GaussianMixtureDataset(n_samples_test, means, stds, weights, seed=seed_test)
 
-        X_train = torch.tensor(train_npz["X"], dtype=torch.float32)
-        y_train = torch.tensor(train_npz["y"], dtype=torch.float32)
-        X_concentration = torch.tensor(concentration_npz["X"], dtype=torch.float32)
-        y_concentration = torch.tensor(concentration_npz["y"], dtype=torch.float32)
-        X_test = torch.tensor(test_npz["X"], dtype=torch.float32)
-        y_test = torch.tensor(test_npz["y"], dtype=torch.float32)
-
-        train_dataset = TensorDataset(X_train, y_train)
-        concentration_dataset = TensorDataset(X_concentration, y_concentration)
-        test_dataset = TensorDataset(X_test, y_test)
-
-        return train_dataset, concentration_dataset, test_dataset
+    return train_dataset, val_dataset
 
 
-    elif dataset_name is not None:
-        return datasets_registry[dataset_name](root, **kwargs)
-    else:
-        try:
-            return ImageFolder(root, **kwargs)
-        except:
-            raise ValueError(f"Dataset {root} not found")
+def get_dataset(dataset_name: str, 
+                 model_name: str, # to get the test transform
+                 root: str,
+                 shuffle: bool = False,
+                 random_state: int = 0,
+                 **kwargs) -> Dataset:
+
+    if dataset_name not in datasets_registry.keys():
+        raise ValueError(f"Dataset {dataset_name} not found")
+
+    model_essentials = get_model_essentials(model_name, dataset_name)
+    test_transform = model_essentials["test_transforms"]
+    if not shuffle:
+        return datasets_registry[dataset_name](
+            root, train=False, 
+            transform=test_transform, 
+            download=True) 
+    
+
+    dataset = datasets_registry[dataset_name](
+            root, train=False, 
+            transform=test_transform, 
+            download=True) 
+    # reproducible permutation
+    gen = torch.Generator()
+    gen.manual_seed(random_state)
+    perm = torch.randperm(len(dataset), generator=gen).tolist()
+
+    return Subset(dataset, perm)
+
+        

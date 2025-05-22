@@ -1,11 +1,17 @@
 
 # -------------------------------
 from typing import Any, Dict
-
+import os
+import torch
 from torchvision import transforms
-
+import json 
 from . import resnet
+from .models import ThresholdClassifier, BayesClassifier, MLPClassifier
 
+DATA_DIR = os.environ.get("DATA_DIR", "./data")
+CHECKPOINTS_DIR_BASE = os.environ.get("CHECKPOINTS_DIR", "checkpoints/")
+
+__all__ = ["ThresholdClassifier", "BayesClassifier", "MLPClassifier"]
 
 
 def _get_default_cifar10_transforms():
@@ -50,7 +56,50 @@ models_registry = {
 
 
 def get_model_essentials(model, dataset, features_nodes=None) -> Dict[str, Any]:
-    model_name = "_".join([model, dataset])
-    if model_name not in models_registry:
-        raise ValueError("Unknown model name: {}".format(model_name))
-    return models_registry[model_name](features_nodes=features_nodes)
+
+    name = "_".join([model, dataset])
+    
+    if name not in models_registry:
+        raise ValueError("Unknown model name: {}".format(name))
+    return models_registry[name](features_nodes=features_nodes)
+
+
+
+
+
+def get_model(model_name: str, dataset_name: str, model_seed, checkpoint_dir) -> torch.nn.Module:
+
+    if model_name == "mlp_synth_dim-10_classes-7":
+        checkpoints_dir = os.path.join(checkpoint_dir, model_name)
+        config_model_path = os.path.join(os.path.join(checkpoint_dir, model_name), "config.json")
+
+        if not os.path.exists(config_model_path):
+            raise FileNotFoundError(f"Configuration file not found at {config_model_path}")
+        # Load the configuration file
+        with open(config_model_path, "r") as f:
+            config_model = json.load(f)
+        
+        # Instantiate the MLP classifier
+        model = MLPClassifier(
+            input_dim=config_model["dim"], 
+            hidden_size=config_model["hidden_dims"][0], 
+            num_hidden_layers=config_model["num_hidden_layers"], 
+            dropout_p=config_model["dropout_p"], 
+            num_classes=config_model["n_classes"]
+            )
+        
+        # Load the model weights
+        checkpoint_path = os.path.join(checkpoints_dir, "best_mlp.pth")
+        
+
+    elif model_name == "resnet34":
+        model_essentials = get_model_essentials(model_name, dataset_name)
+        model = model_essentials["model"]
+        checkpoint_path = os.path.join(checkpoint_dir, "_".join([model_name, dataset_name]), str(model_seed), "best.pth")
+
+    if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint file not found at {checkpoint_path}")
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    model.load_state_dict(checkpoint)
+    
+    return model

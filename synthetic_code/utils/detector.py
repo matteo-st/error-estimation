@@ -1,6 +1,62 @@
 import torch
 from torch.distributions import MultivariateNormal
+from tqdm import tqdm
 
+class MetricLearningLagrange:
+    def __init__(self, model, lbd=0.5, temperature=1, **kwargs):
+        self.model = model
+        self.device = next(model.parameters()).device
+        self.lbd = lbd
+        self.temperature = temperature
+        self.params = None
+
+    def fit(self, train_dataloader, *args, **kwargs):
+        # get train logits
+        train_logits = []
+        train_labels = []
+        for data, labels in tqdm(train_dataloader, desc="Fitting metric"):
+            data = data.to(self.device)
+            with torch.no_grad():
+                logits = self.model(data).cpu()
+            if logits.shape[1] % 2 == 1:  # openmix
+                logits = logits[:, :-1]
+            train_logits.append(logits)
+            train_labels.append(labels)
+        train_logits = torch.cat(train_logits, dim=0)
+        train_pred = train_logits.argmax(dim=1)
+        train_labels = torch.cat(train_labels, dim=0)
+        train_labels = (train_labels != train_pred).int()
+
+        train_probs = torch.softmax(train_logits / self.temperature, dim=1)
+
+        train_probs_pos = train_probs[train_labels == 0]
+        train_probs_neg = train_probs[train_labels == 1]
+
+        self.params = -(1 - self.lbd) * torch.einsum("ij,ik->ijk", train_probs_pos, train_probs_pos).mean(dim=0).to(
+            self.device
+        ) + self.lbd * torch.einsum("ij,ik->ijk", train_probs_neg, train_probs_neg).mean(dim=0).to(self.device)
+        self.params = torch.tril(self.params, diagonal=-1)
+        self.params = self.params + self.params.T
+        self.params = torch.relu(self.params)
+        if torch.all(self.params <= 0):
+            # default to gini
+            self.params = torch.ones(self.params.size()).to(self.device)
+            self.params = torch.tril(self.params, diagonal=-1)
+            self.params = self.params + self.params.T
+        self.params = self.params / self.params.norm()
+
+    def __call__(self, inputs, *args, **kwds):
+        logits = self.model(inputs)
+        probs = torch.softmax(logits / self.temperature, dim=1)
+        params = torch.tril(self.params, diagonal=-1)
+        params = params + params.T
+        params = params / params.norm()
+        print("params", params.shape)
+        print("probs", probs.shape)
+        return torch.diag(probs @ params @ probs.T)
+
+    def export_matrix(self):
+        return self.params.cpu()
 
 class BayesDetector:
     def __init__(self, classifier, weights, means, stds, n_classes, device=torch.device('cpu')):

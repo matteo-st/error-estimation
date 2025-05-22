@@ -170,6 +170,7 @@ results/
 synth_results/
 synthetic_data
 synthetic_results
+first_cifar10_results/
 tensors/
 images/
 *.pt

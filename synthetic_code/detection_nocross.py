@@ -8,8 +8,7 @@ from torch.distributions import MultivariateNormal, Categorical
 from torchvision.models.feature_extraction import create_feature_extractor
 from synthetic_code.utils.models import BayesClassifier, MLPClassifier, get_model
 from synthetic_code.utils.detector import MetricLearningLagrange, BayesDetector, GiniDetector
-from synthetic_code.utils.datasets import GaussianMixtureDataset
-from synthetic_code.utils.datasets import get_dataset
+from synthetic_code.utils.datasets import get_dataset, get_synthetic_dataset
 # from ..models import get_model
 import numpy as np
 from tqdm import tqdm
@@ -370,177 +369,131 @@ def main(config):
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    if False:
-        checkpoints_dir = os.path.join(CHECKPOINTS_DIR_BASE, "ce/mlp_synth_dim-10_classes-7")
-        config_model_path = os.path.join(checkpoints_dir, "config.json")
-        if not os.path.exists(config_model_path):
-            raise FileNotFoundError(f"Configuration file not found at {config_model_path}")
-        # Load the configuration file
-        with open(config_model_path, "r") as f:
-            config_model = json.load(f)
-        
-        # Instantiate the MLP classifier
-        model = MLPClassifier(
-            input_dim=config_model["dim"], 
-            hidden_size=config_model["hidden_dims"][0], 
-            num_hidden_layers=config_model["num_hidden_layers"], 
-            dropout_p=config_model["dropout_p"], 
-            num_classes=config_model["n_classes"]
+    
+    model = get_model(model_name=config["model"]["name"], 
+                    dataset_name=config["data"]["name"],
+                    model_seed=config["model"]["model_seed"],
+                    checkpoint_dir = os.path.join(CHECKPOINTS_DIR_BASE, "ce")
+                    )
+    model = model.to(device)
+    model.eval()
+
+    if config["data"]["name"] == "gaussian_mixture":
+
+        train_dataset, test_dataset = get_synthetic_dataset(
+            model_name=config["model"]["name"],
+            n_samples_train = config["data"]["n_samples_train"],
+            n_samples_test = config["data"]["n_samples_test"],
+            seed_train = config["data"]["seed_train"],
+            seed_test = config["data"]["seed_test"],
+            device = device
             )
-        
-        # Load the model weights
-        checkpoint_path = os.path.join(checkpoints_dir, "best_mlp.pth")
-        if not os.path.exists(checkpoint_path):
-            raise FileNotFoundError(f"Checkpoint file not found at {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location="cpu")
-        model.load_state_dict(checkpoint)
-
-        # from torchvision.models.feature_extraction import get_graph_node_names
-
-        # # assume `model` is your nn.Module
-        # train_nodes, eval_nodes = get_graph_node_names(model)
-
-        # print("Nodes when traced in train() mode:")
-        # for n in train_nodes:
-        #     print("  ", n)
-
-        # print("\nNodes when traced in eval() mode:")
-        # for n in eval_nodes:
-        #     print("  ", n)
-        # return
-        # Load the Dataset parameters
-        means = torch.tensor(config_model["means"]).to(device)
-        stds = torch.tensor(config_model["stds"]).to(device)
-        weights = torch.tensor(config_model["weights"]).to(device)
-
-        # Generate Dataset
-            # Create training and validation datasets.
-        train_dataset = GaussianMixtureDataset(config["data"]["n_samples_train"], means, stds, weights, seed=config["data"]["seed_train"])
-        val_dataset = GaussianMixtureDataset(config["data"]["n_samples_test"], means, stds, weights, seed=config["data"]["seed_test"])
-
     else:
-        model = get_model(model_name=config["model"]["name"], 
-                      dataset_name=config["data"]["name"],
-                      model_seed=config["model"]["model_seed"],
-                      checkpoint_dir = os.path.join(CHECKPOINTS_DIR_BASE, "ce")
-                      )
-        model = model.to(device)
-        model.eval()
-
         dataset = get_dataset(
-                dataset_name=config["data"]["name"], model_name=config["model"]["name"], 
-                root=DATA_DIR,  shuffle=True, random_state=seed)
-        print("Dataset size", len(dataset))
+            dataset_name=config["data"]["name"], 
+            model_name=config["model"]["name"], 
+            root=DATA_DIR,  
+            shuffle=True, 
+            random_state=seed)
 
-    # Load the cross-validation splits
-    crossval_path = os.path.join(DATA_DIR, 
-                                 "cifar10-crossval", 
-                                 "crossval-" + str(config["data"]["num_crossval"]), 
-                                 "crossval-1.pkl")
-    with open(crossval_path, "rb") as f:
-        splits = pickle.load(f)
-
-    for fold_idx, (train_idx, test_idx) in enumerate(splits):
-        print(f"Fold {fold_idx + 1}")
-        # Create subsets for the current fold
-        train_subset = Subset(dataset, train_idx)
-        val_subset = Subset(dataset, test_idx)
+    print("Dataset size", len(dataset))
 
 
-        # Create DataLoaders.
-        train_loader = DataLoader(train_subset, batch_size=config["data"]["batch_size_train"], shuffle=False, num_workers=4)  # Each batch: [32, 10]
-        val_loader = DataLoader(val_subset, batch_size=config["data"]["batch_size_test"], shuffle=False, num_workers=4)       # Each batch: [32, 10]
 
-    
-        # if config["method_name"] == "clustering":
-        #     detector = PartitionDetector(model, weights, means, stds, 
-        #                                 n_cluster=config["clustering"]["n_clusters"], 
-        #                                 alpha=config["clustering"]["alpha"], 
-        #                                 method=config["clustering"]["name"], 
-        #                                 device=device, 
-        #                                 kmeans_seed=config["clustering"]["seed"], 
-        #                                 #  init_scheme=config["k-means++"],
-        #                                 #  temperature=config["temperature"],
-        #                                 partionning_space=config["clustering"]["space"],
-        #                                 #  cov_type=config["clustering"]["cov_type"]
-        #                                 )
-        if config["method_name"] == "metric_learning":
-            detector = MetricLearningLagrange(model, 
-                                            lbd=config["metric_learning"]["lambda"], 
-                                            temperature=config["metric_learning"]["temperature"]
-                                            )
-
-        detector.fit(train_loader)
-        # detector = GiniDetector(model, temperature=config["temperature"], normalize = config["normalize_gini"], device=device)
-        # detector = BayesDetector(model, weights, means, stds, config_model["n_classes"], device=device)
-        # print("converged ?", detector.clustering_algo.converged_)
-    
-        if (config["method_name"] == "clustering") & (config["clustering"]["name"] == "soft-kmeans"):
-            # with open(os.path.join(experiment_folder, 'clustering_algo.pkl'), "wb") as f:
-            #     pickle.dump(detector.clustering_algo, f)
-            joblib.dump(detector.clustering_algo, os.path.join(experiment_folder, 'clustering_algo.pkl'))
-        # Save the clustering algorithm
-
-        if (config["method_name"] == "clustering") & (config["clustering"]["name"] == "kmeans"):
-            cluster_center =  detector.clustering_algo.cluster_centers_.flatten()
-            # sort_permut = np.argsort(cluster_center)
-            # print("sort_permut", sort_permut)
-
-            # cluster_center_sorted = cluster_center[sort_permut]
-            # cluster_intervals_sorted = np.array(detector.cluster_intervals)[sort_permut]
-            df_cluster_centers = pd.DataFrame({"centers": cluster_center}).reset_index().rename(columns={"index": "cluster"})
-            df_cluster_centers.sort_values(by="centers", ascending=True, inplace=True)
-            
-            # print("cluster centers", cluster_center_sorted)
-            # print("boundary clusters", (cluster_center_sorted[1:] + cluster_center_sorted[:-1]) / 2)
-            # print("cluster intervals", cluster_intervals_sorted)
-            
-            df_cluster_centers.to_csv(os.path.join(experiment_folder, "cluster_centers.csv"), index=False)
+    # Create DataLoaders.
+    train_loader = DataLoader(train_dataset, batch_size=config["data"]["batch_size_train"], shuffle=False, num_workers=4)  # Each batch: [32, 10]
+    val_loader = DataLoader(test_dataset, batch_size=config["data"]["batch_size_test"], shuffle=False, num_workers=4)       # Each batch: [32, 10]
 
 
-        evaluator_train = DetectorEvaluator(model, train_loader, device, return_embs=return_embs)
-        fpr_train, tpr_train, thr_train, train_detector_preds, train_detector_labels, train_clusters, train_embs = evaluator_train.evaluate(detector)
+    if config["method_name"] == "clustering":
+        detector = PartitionDetector(model, weights, means, stds, 
+                                    n_cluster=config["clustering"]["n_clusters"], 
+                                    alpha=config["clustering"]["alpha"], 
+                                    method=config["clustering"]["name"], 
+                                    device=device, 
+                                    kmeans_seed=config["clustering"]["seed"], 
+                                    #  init_scheme=config["k-means++"],
+                                    #  temperature=config["temperature"],
+                                    partionning_space=config["clustering"]["space"],
+                                    #  cov_type=config["clustering"]["cov_type"]
+                                    )
+    elif config["method_name"] == "metric_learning":
+        detector = MetricLearningLagrange(model, 
+                                        lbd=config["metric_learning"]["lambda"], 
+                                        temperature=config["metric_learning"]["temperature"]
+                                        )
 
-        df_train_detection = pd.DataFrame({
-            "embs": train_embs,
-            'detector_preds' : train_detector_preds,
-            "detector_labels": train_detector_labels,
-            "clusters": train_clusters,
-            })
+    detector.fit(train_loader)
+    # detector = GiniDetector(model, temperature=config["temperature"], normalize = config["normalize_gini"], device=device)
+    # detector = BayesDetector(model, weights, means, stds, config_model["n_classes"], device=device)
+    # print("converged ?", detector.clustering_algo.converged_)
 
-        df_train_detection.to_csv(os.path.join(experiment_folder, "detector_train_predictions.csv"), index=False)
+    if (config["method_name"] == "clustering") & (config["clustering"]["name"] == "soft-kmeans"):
+        # with open(os.path.join(experiment_folder, 'clustering_algo.pkl'), "wb") as f:
+        #     pickle.dump(detector.clustering_algo, f)
+        joblib.dump(detector.clustering_algo, os.path.join(experiment_folder, 'clustering_algo.pkl'))
+    # Save the clustering algorithm
 
-        print("--- Train Results ----")
-        print("FPR at TPR=0.95:", fpr_train)
-        print("TPR at TPR=0.95:", tpr_train)
-        print("Threshold at TPR=0.95:", thr_train)
+    if (config["method_name"] == "clustering") & (config["clustering"]["name"] == "kmeans"):
+        cluster_center =  detector.clustering_algo.cluster_centers_.flatten()
+        # sort_permut = np.argsort(cluster_center)
+        # print("sort_permut", sort_permut)
+
+        # cluster_center_sorted = cluster_center[sort_permut]
+        # cluster_intervals_sorted = np.array(detector.cluster_intervals)[sort_permut]
+        df_cluster_centers = pd.DataFrame({"centers": cluster_center}).reset_index().rename(columns={"index": "cluster"})
+        df_cluster_centers.sort_values(by="centers", ascending=True, inplace=True)
         
-        evaluator_val = DetectorEvaluator(model, val_loader, device, return_embs=return_embs)
-        fpr_val, tpr_val, thr_val, val_detector_preds, val_detector_labels, val_clusters, val_embs = evaluator_val.evaluate(detector)
-
-        df_val_detection = pd.DataFrame({
-            "embs": val_embs,
-            "detector_preds":  val_detector_preds,
-            "detector_labels": val_detector_labels,
-            "clusters": val_clusters,
-            })
-
-        df_val_detection.to_csv(os.path.join(experiment_folder, "detector_val_predictions.csv"), index=False)
+        # print("cluster centers", cluster_center_sorted)
+        # print("boundary clusters", (cluster_center_sorted[1:] + cluster_center_sorted[:-1]) / 2)
+        # print("cluster intervals", cluster_intervals_sorted)
         
-        print("--- Validation Results ----")
-        print("FPR at TPR=0.95:", fpr_val)
-        print("TPR at TPR=0.95:", tpr_val)
-        print("Threshold at TPR=0.95:", thr_val)
+        df_cluster_centers.to_csv(os.path.join(experiment_folder, "cluster_centers.csv"), index=False)
 
-        results = [{
-            "fpr_train": fpr_train, "tpr_train": tpr_train, "thr_train": thr_train,
-            "fpr_val": fpr_val, "tpr_val": tpr_val, "thr_val": thr_val,
-            # "inertia": detector.inertia,
-            }]
-        # print(detector.inertia)
-        results_df = pd.DataFrame(results)
-        # Save the results to a CSV file
-        results_df.to_csv(os.path.join(experiment_folder, "detector_results.csv"), index=False)
+
+    evaluator_train = DetectorEvaluator(model, train_loader, device, return_embs=return_embs)
+    fpr_train, tpr_train, thr_train, train_detector_preds, train_detector_labels, train_clusters, train_embs = evaluator_train.evaluate(detector)
+
+    df_train_detection = pd.DataFrame({
+        "embs": train_embs,
+        'detector_preds' : train_detector_preds,
+        "detector_labels": train_detector_labels,
+        "clusters": train_clusters,
+        })
+
+    df_train_detection.to_csv(os.path.join(experiment_folder, "detector_train_predictions.csv"), index=False)
+
+    print("--- Train Results ----")
+    print("FPR at TPR=0.95:", fpr_train)
+    print("TPR at TPR=0.95:", tpr_train)
+    print("Threshold at TPR=0.95:", thr_train)
+    
+    evaluator_val = DetectorEvaluator(model, val_loader, device, return_embs=return_embs)
+    fpr_val, tpr_val, thr_val, val_detector_preds, val_detector_labels, val_clusters, val_embs = evaluator_val.evaluate(detector)
+
+    df_val_detection = pd.DataFrame({
+        "embs": val_embs,
+        "detector_preds":  val_detector_preds,
+        "detector_labels": val_detector_labels,
+        "clusters": val_clusters,
+        })
+
+    df_val_detection.to_csv(os.path.join(experiment_folder, "detector_val_predictions.csv"), index=False)
+    
+    print("--- Validation Results ----")
+    print("FPR at TPR=0.95:", fpr_val)
+    print("TPR at TPR=0.95:", tpr_val)
+    print("Threshold at TPR=0.95:", thr_val)
+
+    results = [{
+        "fpr_train": fpr_train, "tpr_train": tpr_train, "thr_train": thr_train,
+        "fpr_val": fpr_val, "tpr_val": tpr_val, "thr_val": thr_val,
+        # "inertia": detector.inertia,
+        }]
+    # print(detector.inertia)
+    results_df = pd.DataFrame(results)
+    # Save the results to a CSV file
+    results_df.to_csv(os.path.join(experiment_folder, "detector_results.csv"), index=False)
 
 
 if __name__ == "__main__":
