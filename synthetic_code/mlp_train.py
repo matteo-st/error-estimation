@@ -7,9 +7,10 @@ from tqdm import tqdm
 import os
 import json
 import datetime
+import random
 import pandas as pd
-from synthetic_code.utils.dataset import GaussianMixtureDataset
-from synthetic_code.utils.model import BayesClassifier, MLPClassifier
+from synthetic_code.utils.datasets import GaussianMixtureDataset
+from synthetic_code.utils.models import BayesClassifier, MLPClassifier, resnet
 
 
 
@@ -46,7 +47,7 @@ class Evaluator:
                 # x: [batch_size, dim], labels: [batch_size]
                 x = x.to(self.device)
                 labels = labels.to(self.device)
-                logits, _ = self.model(x)  # logits: [batch_size, num_classes]
+                logits = self.model(x)  # logits: [batch_size, num_classes]
                 preds = torch.argmax(logits, dim=1)  # [batch_size]
                 correct += (preds == labels).sum().item()
                 total += labels.size(0)
@@ -94,7 +95,8 @@ class Trainer:
                 x = x.to(self.device)
                 labels = labels.to(self.device)
                 self.optimizer.zero_grad()
-                logits, _ = self.model(x)  # logits: [batch_size, num_classes]
+                # logits, _ = self.model(x)  # logits: [batch_size, num_classes]
+                logits = self.model(x)  # logits: [batch_size, num_classes]
                 loss = self.criterion(logits, labels)
                 loss.backward()
                 self.optimizer.step()
@@ -126,48 +128,93 @@ class Trainer:
 def main():
     # Set random seeds for reproducibility.
     seed = 107
+
+    random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark     = False
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # Mixture-of-Gaussians parameters.
-    dim = 10         # Feature dimension: each sample is [10]
-    n_classes = 7    # Mixture has 7 components/classes.
-    n_samples_train = 20000
+    dim = 3072        # Feature dimension: each sample is [10]
+    n_classes = 20    # Mixture has 7 components/classes.
+    mu_scale = 0.1
+    cov_scale = 1
+    seed_parameters = 42  # Seed for generating means and covariances.
+    n_samples_train = 50000
     n_samples_val = 20000
     lr = 1e-3
-    epochs = 30
-    batch_size_train = 32
-    batch_size_val = 32
+    epochs = 10
+    batch_size_train = 252
+    batch_size_val = 252
+    model_name = "resnet34"
+
     
     # Generate mixture parameters.
     # means: [7, 10]
-    means = torch.rand(n_classes, dim)
+    # means = torch.rand(n_classes, dim)
+    gen = torch.Generator().manual_seed(seed_parameters)
+    means = torch.rand(n_classes, dim, generator = gen) * mu_scale   # Scale the means to control their spread.
     # stds: [7, 10]
-    stds = torch.rand(n_classes, dim)
+    # 1) Sample random A for each component
+    A = torch.randn(n_classes, dim, dim, generator = gen) * cov_scale 
+    # 2) Form Σ = A @ Aᵀ
+    print("symmetic covariance matrices")
+    covs =  A @ A.transpose(-2, -1)
+    covs = 0.5 * (covs + covs.transpose(-2, -1))
+    # 3) (Optional) add small diagonal for numerical stability
+    eps = 1e-3
+    covs += eps * torch.eye(dim).unsqueeze(0) 
+    print("end of symmetric covariance matrices")
+    # print("covs shape:", covs.shape)  # Should be [n_classes, dim, dim]
+    # eigs = torch.linalg.eigvalsh(covs)
+    # print("eigs shape", eigs.shape)
+    # for i in range(n_classes):
+    #     print("Class", i, "eigenvalues:", eigs[i].min())
+    
+
+    # stds = torch.rand(n_classes, dim)
     # weights: [7]
-    weights = torch.rand(n_classes)
+    weights = torch.rand(n_classes, generator = gen)
     weights = weights / weights.sum()  # Normalize to sum to 1.
 
     config = {
-        "dim": dim,
-        "n_classes": n_classes,
-        "n_samples_train": n_samples_train,
-        "n_samples_val": n_samples_val,
-        "lr": lr,
-        "epochs": epochs,
-        "means": means.tolist(),
-        "stds": stds.tolist(),
-        "weights": weights.tolist(),
-        "hidden_dims": [128, 128],
-        "num_hidden_layers": 2,
-        "dropout_p": 0.2,
-        "batch_size": 32,
+        "data" : {
+            "dim": dim,
+            "n_classes": n_classes,
+            "mu_scale" : mu_scale,
+            "cov_scale": cov_scale,
+            "seed_parameters": seed_parameters,
+            "n_samples_train": n_samples_train,
+            "n_samples_val": n_samples_val,
+            "seed_train": 107,
+            "seed_val": -107,
+            "means": means.tolist(),
+            "covs": covs.tolist(), # std before
+            "weights": weights.tolist(),
+        },
+        "training": {
+            "lr": lr,
+            "epochs": epochs,
+            "dropout_p": 0.2,
+            "batch_size_train": batch_size_train,
+            "batch_size_val": batch_size_val,
+        },
+        "model": {
+            "name": model_name,
+            # "hidden_dims": [128, 128],
+            "num_hidden_layers": 2
+            },
+        
         "seed": seed
     }
 
-    checkpoint_dir = os.path.join("checkpoints/ce", f"mlp_synth_dim-{dim}_classes-{n_classes}")
-    # Create the checkpoint folder.
-
+    checkpoint_dir = os.path.join("checkpoints/ce", f"{model_name}_synth_dim-{dim}_classes-{n_classes}")
+    # # Create the checkpoint folder.
+    print(f"Creating checkpoint directory: {checkpoint_dir}")
     os.makedirs(checkpoint_dir, exist_ok=True)
     
     # Add the current date and time to the configuration.
@@ -178,25 +225,50 @@ def main():
         json.dump(config, f, indent=4)
     
     # Create training and validation datasets.
-    train_dataset = GaussianMixtureDataset(n_samples_train, means, stds, weights)
-    val_dataset = GaussianMixtureDataset(n_samples_val, means, stds, weights)
+    print("Creating datasets...")
+    train_dataset = GaussianMixtureDataset(n_samples_train, means, covs, weights, 
+                                        #    seed=config["data"]["seed_train"]
+                                           )
+    val_dataset = GaussianMixtureDataset(n_samples_val, means, covs, weights, 
+                                        #  seed=config["data"]["seed_val"]
+                                         )
     
     # Create DataLoaders.
-    train_loader = DataLoader(train_dataset, batch_size=batch_size_train, shuffle=True)  # Each batch: [32, 10]
-    val_loader = DataLoader(val_dataset, batch_size=batch_size_val, shuffle=False)       # Each batch: [32, 10]
+    train_loader = DataLoader(train_dataset, batch_size=config["training"]["batch_size_train"], shuffle=False,
+                              num_workers=4, pin_memory=True
+                              )  # Each batch: [32, 10]
+    val_loader = DataLoader(val_dataset, batch_size=config["training"]["batch_size_val"], shuffle=False,
+                            num_workers=4, pin_memory=True
+                              )  # Each batch: [32, 10])       # Each batch: [32, 10]
     
     # Instantiate the MLP classifier.
-    model = MLPClassifier(input_dim=dim, hidden_size=128, num_hidden_layers=2, dropout_p=0.2, num_classes=n_classes)
+    print("Creating model...")
+    if config["model"]["name"] == "resnet34":
+        model = resnet.ResNet34(n_classes)
+        model.to(device)
+        # model.eval()
+        # print('mode', model(torch.randn(1, 3, 32, 32).to(device)))  # Dummy forward pass to initialize model.
+        # exit()
+    elif config["model"]["name"] == "mlp":
+        model = MLPClassifier(input_dim=dim, hidden_size=128, num_hidden_layers=config["model"]["num_hidden_layers"], 
+                              dropout_p=config["training"]["dropout_p"], num_classes=n_classes)
+    else:
+        raise ValueError(f"Unknown model name: {config['model']['name']}")
     
-    # Define device.
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # # Define device.
+    # device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
     # Compute Bayes classifier
-    covs = torch.diag_embed(stds ** 2)
+    # covs = torch.diag_embed(stds ** 2)
+    print("Computing Bayes classifier...")
     bayes_model = BayesClassifier(means, covs, weights)
     bayes_evaluator = Evaluator(bayes_model, val_loader, device)
     bayes_accuracy, _, _ = bayes_evaluator.evaluate()
-    print(f"Bayes Accuracy: {bayes_accuracy:.4f}")
+    print(f"Bayes Val Accuracy: {bayes_accuracy:.4f}")
+
+    bayes_evaluator = Evaluator(bayes_model, train_loader, device)
+    bayes_accuracy, _, _ = bayes_evaluator.evaluate()
+    print(f"Bayes Train Accuracy: {bayes_accuracy:.4f}")
 
     # Create and run the trainer.
     trainer = Trainer(model, train_loader, val_loader, device, checkpoint_dir, epochs=epochs, lr=lr)
