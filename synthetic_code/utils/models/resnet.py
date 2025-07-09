@@ -84,6 +84,7 @@ class ResNet(nn.Module):
         self.layer2 = self._make_layer(block, 128, num_blocks[1], stride=2)
         self.layer3 = self._make_layer(block, 256, num_blocks[2], stride=2)
         self.layer4 = self._make_layer(block, 512, num_blocks[3], stride=2)
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.linear = nn.Linear(512 * block.expansion, num_classes)
 
     def _make_layer(self, block, planes, num_blocks, stride):
@@ -95,14 +96,28 @@ class ResNet(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x):
+        # print("Input shape:", x.shape)  # Debugging line to check input shape
         out = F.relu(self.bn1(self.conv1(x)))
+        # print("After conv1 shape:", out.shape)  # Debugging line to check shape after first conv
         out = self.layer1(out)
+        # print("After layer1 shape:", out.shape)  # Debugging line to check shape after layer1
         out = self.layer2(out)
+        # print("After layer2 shape:", out.shape)  # Debugging line to check shape after layer2
         out = self.layer3(out)
+        # print("After layer3 shape:", out.shape)  # Debugging line to check shape after layer3
+        # print("out.flatten(1)", out.flatten(1).shape)  # Debugging line to check shape before flattening
         out = self.layer4(out)
-        out = F.avg_pool2d(out, 4)
+        # print("After layer4 shape:", out.shape)  # torch.Size([1, 512, 4, 4])
+        # print("out.flatten(1)", out.flatten(1).shape)  # torch.Size([1, 8192])
+        out = self.avgpool(out)  # 512
+        # out = F.avg_pool2d(out, 4)
+        # print("After avg_pool2d shape:", out.shape)  # torch.Size([1, 512])
+        # print("out.flatten(1)", out.flatten(1).shape)  # torch.Size([1, 512]
         out = out.view(out.size(0), -1)
+        # print("After view shape:", out.shape)  # Debugging line to check shape after flattening
         out = self.linear(out)
+        # print("Output shape:", out.shape)
+
         return out
 
 

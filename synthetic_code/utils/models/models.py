@@ -51,6 +51,7 @@ class BayesClassifier(nn.Module):
         self.register_buffer('covs', covs)
         # weights: [n_classes]
         self.register_buffer('weights', weights)
+        self.register_buffer('log_weights', torch.log(weights))
         self.n_classes, self.dim = means.shape
 
     def forward(self, x):
@@ -68,27 +69,34 @@ class BayesClassifier(nn.Module):
                                       e.g., posterior: [batch_size, n_classes]
         """
         batch_size = x.shape[0]  # batch_size
+        x = x.view(batch_size, -1)  
         
         # Collect weighted probability densities for each class.
-        probs = []
+        logits = []
         for i in range(self.n_classes):
             # Create a multivariate normal distribution for class i using mean and covariance.
             # For each class i: mean: [dim], covariance matrix: [dim, dim]
+            # eigs = torch.linalg.eigvalsh(self.covs[i])
+            # print("eigs shape", eigs.shape)
+       
+            # print("Class", i, "eigenvalues:", eigs.min())
             mvn = MultivariateNormal(loc=self.means[i], covariance_matrix=self.covs[i])
             # Evaluate probability density for each sample in x.
             # pdf_vals: [batch_size]
-            pdf_vals = torch.exp(mvn.log_prob(x))  # log_prob: [batch_size], exp gives a numerical probability.
+            # pdf_vals = torch.exp(mvn.log_prob(x))  # log_prob: [batch_size], exp gives a numerical probability.
+            log_pdf_vals = mvn.log_prob(x)  # log_prob: [batch_size], exp gives a numerical probability.
             # Multiply by the prior weight for class i: scalar * [batch_size] = [batch_size]
-            probs.append(self.weights[i] * pdf_vals)
+            logits.append(self.log_weights[i]  + log_pdf_vals)
             
         # Stack the probabilities for each class along dimension 1.
         # probs: [batch_size, n_classes]
-        probs = torch.stack(probs, dim=1)
+        logits = torch.stack(logits, dim=1)
         # Normalize to obtain the posterior probability for each class.
-        posterior = probs / probs.sum(dim=1, keepdim=True)  # [batch_size, n_classes]
-        # Predicted class: index of maximum posterior probability.
-        preds = torch.argmax(posterior, dim=1)  # [batch_size]
-        return posterior, preds
+        # posterior = probs / probs.sum(dim=1, keepdim=True)  # [batch_size, n_classes]
+        # # Predicted class: index of maximum posterior probability.
+        # preds = torch.argmax(posterior, dim=1)  # [batch_size]
+        # return posterior, preds
+        return logits
 
 
 class MLPClassifier(nn.Module):
@@ -148,8 +156,9 @@ class MLPClassifier(nn.Module):
         if self.hidden_layers is not None:
             x = self.hidden_layers(x)   # [batch_size, hidden_size]
         logits = self.classifier(x)     # [batch_size, num_classes]
-        probs = torch.softmax(logits, dim=1)  # [batch_size, num_classes]
-        return logits, probs
+        # probs = torch.softmax(logits, dim=1)  # [batch_size, num_classes]
+        # return logits, probs
+        return logits
 
 class MLP(nn.Module):
     def __init__(self, input_dim, hidden_dims=[64, 32], num_classes=3):

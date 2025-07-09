@@ -67,11 +67,18 @@ def get_model_essentials(model, dataset, features_nodes=None) -> Dict[str, Any]:
 
 
 
-def get_model(model_name: str, dataset_name: str, model_seed, checkpoint_dir) -> torch.nn.Module:
+def get_model(model_name: str, 
+              dataset_name: str, 
+              n_classes: int,
+              input_dim,
+              model_seed, 
+              checkpoint_dir,
+              desired_indices=None) -> torch.nn.Module:
 
     if model_name == "mlp_synth_dim-10_classes-7":
-        checkpoints_dir = os.path.join(checkpoint_dir, model_name)
-        config_model_path = os.path.join(os.path.join(checkpoint_dir, model_name), "config.json")
+       
+        checkpoint_dir = os.path.join(checkpoint_dir, model_name)
+        config_model_path = os.path.join(checkpoint_dir, "config.json")
 
         if not os.path.exists(config_model_path):
             raise FileNotFoundError(f"Configuration file not found at {config_model_path}")
@@ -89,17 +96,63 @@ def get_model(model_name: str, dataset_name: str, model_seed, checkpoint_dir) ->
             )
         
         # Load the model weights
-        checkpoint_path = os.path.join(checkpoints_dir, "best_mlp.pth")
-        
+        checkpoint_path = os.path.join(checkpoint_dir, "best_mlp.pth")
 
-    elif model_name == "resnet34":
+    
+    elif (model_name == "resnet34") and (dataset_name == "gaussian_mixture"):
+
+        checkpoint_dir = os.path.join(checkpoint_dir, 
+                                      model_name + f"_synth_dim-{input_dim}_classes-{n_classes}")
+        # config_model_path = os.path.join(checkpoint_dir, "config.json")
+
+        # if not os.path.exists(config_model_path):
+        #     raise FileNotFoundError(f"Configuration file not found at {config_model_path}")
+        # # Load the configuration file
+        # with open(config_model_path, "r") as f:
+        #     config_model = json.load(f)
+        
+        # Instantiate the MLP classifier
+        model = resnet.ResNet34(n_classes)
+        
+        # Load the model weights
+        checkpoint_path = os.path.join(checkpoint_dir, "best_mlp.pth")
+
+
+    elif (model_name == "resnet34") and (dataset_name == "cifar10"):
         model_essentials = get_model_essentials(model_name, dataset_name)
         model = model_essentials["model"]
         checkpoint_path = os.path.join(checkpoint_dir, "_".join([model_name, dataset_name]), str(model_seed), "best.pth")
+        
 
     if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint file not found at {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    checkpoint = {k.replace("module.", ""): v for k, v in checkpoint.items()}
+    # print("checkpoint keys", checkpoint.keys())
+    # print("model keys before loading", model.state_dict().keys())
     model.load_state_dict(checkpoint)
+    # missing_keys, unexpected_keys = model.load_state_dict(checkpoint, strict=False)
+    # print("Missing:", missing_keys)
+    # print("Unexpected:", unexpected_keys)
+
+    if desired_indices is not None:
+        model = SubsetLogitWrapper(model, desired_indices)
     
     return model
+
+
+class SubsetLogitWrapper(torch.nn.Module):
+    def __init__(self, base_model: torch.nn.Module, desired_indices: list[int]):
+        """
+        Wraps any classifier that outputs logits over N classes,
+        and on forward() returns only the logits of `desired_indices`.
+        """
+        super().__init__()
+        self.model = base_model
+        self.indices = torch.tensor(desired_indices, dtype=torch.long)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Get full logits from base model: shape [B, N]
+        logits = self.model(x)
+        # Select only desired class logits: shape [B, K]
+        return logits[:, self.indices]
