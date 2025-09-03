@@ -186,5 +186,9 @@ requirements_from_311.txt
 
 .python-version
 
-synthetic_code/utils/theory/probit_assumption.ipynb
-synthetic_code/utils/test_metrics.ipynb
+code/utils/theory/
+code/utils/test_metrics.ipynb
+code/old
+code/utils/old
+code/utils/clustering/visualizations
+code/utils/dataset/old
