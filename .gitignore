@@ -179,7 +179,7 @@ images/
 nohup.out
 data/
 myenv/
-code/
+mismatch_and_corrpution
 
 requirements_from_311_clean.txt
 requirements_from_311.txt
