@@ -252,7 +252,7 @@ if __name__ == "__main__":
     config = {
         "seed" : 1,
         "data" : {
-            "name" : "cifar10", # gaussian_mixture
+            "name" : "imagenet", # gaussian_mixture
             # "n_samples" : 10000,
             "seed" : 1,
             "seed_split" : 1,

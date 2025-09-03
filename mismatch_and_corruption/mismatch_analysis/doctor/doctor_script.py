@@ -61,7 +61,8 @@ if __name__ == "__main__":
         match_dataset_name, data_path)
 
     # get the model from the checkpoint of the match dataset
-    checkpoint_path = f"./{model_name}/{match_dataset_name}/{model_seed}/best.pth"
+    # checkpoint_path = f"./{model_name}/{match_dataset_name}/{model_seed}/best.pth"
+    checkpoint_path = f"../checkpoints/ce/{model_name}_{match_dataset_name}/{model_seed}/best.pth"
     net = ml_tools.get_model(model_name=model_name, num_classes=match_num_classes,
                              checkpoint_path=checkpoint_path)
 
@@ -101,13 +102,13 @@ if __name__ == "__main__":
     ##################
     ##################
 
-    mismatch_trainset = torch.load(
-        f'./data/mismatch_data/{mismatch_dataset_name}/trainset.pt')
-    mismatch_testset = torch.load(
-        f'./data/mismatch_data/{mismatch_dataset_name}/testset.pt')
+    # mismatch_trainset = torch.load(
+    #     f'./data/mismatch_data/{mismatch_dataset_name}/trainset.pt')
+    # mismatch_testset = torch.load(
+    #     f'./data/mismatch_data/{mismatch_dataset_name}/testset.pt')
 
-    # mismatch_trainset, mismatch_testset, _ = data_tools.get_data(
-    #     mismatch_dataset_name, data_path)
+    mismatch_trainset, mismatch_testset, _ = data_tools.get_data(
+        mismatch_dataset_name, data_path)
 
     mismatch_trainloader = torch.utils.data.DataLoader(
         mismatch_trainset, batch_size=batch_size, shuffle=False, num_workers=2, generator=torch_gen)

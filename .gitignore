@@ -127,6 +127,8 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+myenv_old
+myenv
 
 # Spyder project settings
 .spyderproject
@@ -178,3 +180,11 @@ nohup.out
 data/
 myenv/
 code/
+
+requirements_from_311_clean.txt
+requirements_from_311.txt
+
+.python-version
+
+synthetic_code/utils/theory/probit_assumption.ipynb
+synthetic_code/utils/test_metrics.ipynb

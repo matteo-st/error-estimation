@@ -5,8 +5,10 @@ import os
 import torch
 from torchvision import transforms
 import json 
-from . import resnet
+from . import resnet, densenet
 from .models import ThresholdClassifier, BayesClassifier, MLPClassifier
+from transformers import ViTForImageClassification, ViTImageProcessor
+import timm
 
 DATA_DIR = os.environ.get("DATA_DIR", "./data")
 CHECKPOINTS_DIR_BASE = os.environ.get("CHECKPOINTS_DIR", "checkpoints/")
@@ -33,6 +35,163 @@ def _get_default_cifar10_transforms():
     )
     return train_transforms, test_transforms
 
+
+def _get_default_cifar100_transforms():
+    statistics = ((0.4914, 0.482158, 0.446531), (0.247032, 0.243486, 0.261588))
+    test_transforms = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.Resize((32, 32)),
+            transforms.Normalize(*statistics),
+        ]
+    )
+    train_transforms = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.Normalize(*statistics),
+        ]
+    )
+    return train_transforms, test_transforms
+
+
+def _get_default_imagenet_transforms():
+    # Standard ImageNet normalization and resizing to 224×224
+    statistics = ((0.485, 0.456, 0.406), (0.229, 0.224, 0.225))
+    test_transforms = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Resize((224, 224)),
+        transforms.Normalize(*statistics),
+    ])
+    train_transforms = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.RandomResizedCrop(224),
+        transforms.RandomHorizontalFlip(),
+        transforms.Normalize(*statistics),
+    ])
+    return train_transforms, test_transforms
+
+class ViTLogitsOnly(ViTForImageClassification):
+    def forward(self, *args, **kwargs) -> torch.Tensor:
+        # Call parent forward to get the ImageClassifierOutput
+        outputs = super().forward(*args, **kwargs)
+        # Return only the logits tensor
+        return outputs.logits
+
+def ViTBase16ImageNet(features_nodes=None):
+    train_transforms, test_transforms = _get_default_imagenet_transforms()
+    processor = ViTImageProcessor.from_pretrained('google/vit-base-patch16-224')
+    model = ViTLogitsOnly.from_pretrained(
+        "google/vit-base-patch16-224")
+    input_dim = (3, 224, 224)
+    if features_nodes is None:
+        features_nodes = {"view": "pooler", "classifier": "classifier"}
+    return {
+        "model": model,
+        "features_nodes": features_nodes,
+        "input_dim": input_dim,
+        "test_transforms": processor,
+        "train_transforms": train_transforms,
+    }
+
+def TimmViTBase16ImageNet(features_nodes=None):
+    train_transforms, test_transforms = _get_default_imagenet_transforms()
+    
+    model = timm.create_model('vit_base_patch16_224.orig_in21k_ft_in1k', pretrained=True)
+
+    # get model specific transforms (normalization, resize)
+    data_config = timm.data.resolve_model_data_config(model)
+    transforms = timm.data.create_transform(**data_config, is_training=False)
+    input_dim = (3, 224, 224)
+    if features_nodes is None:
+        features_nodes = {"view": "pooler", "classifier": "classifier"}
+    return {
+        "model": model,
+        "features_nodes": features_nodes,
+        "input_dim": input_dim,
+        "test_transforms": transforms,
+        "train_transforms": train_transforms,
+    }
+
+
+def TimmViTTiny16ImageNet(features_nodes=None):
+    train_transforms, test_transforms = _get_default_imagenet_transforms()
+    
+    model = timm.create_model('vit_tiny_patch16_224.augreg_in21k_ft_in1k', pretrained=True)
+
+    # get model specific transforms (normalization, resize)
+    data_config = timm.data.resolve_model_data_config(model)
+    transforms = timm.data.create_transform(**data_config, is_training=False)
+    input_dim = (3, 224, 224)
+    if features_nodes is None:
+        features_nodes = {"view": "pooler", "classifier": "classifier"}
+    return {
+        "model": model,
+        "features_nodes": features_nodes,
+        "input_dim": input_dim,
+        "test_transforms": transforms,
+        "train_transforms": train_transforms,
+    }
+
+
+def ViTLarge16ImageNet(features_nodes=None):
+    train_transforms, test_transforms = _get_default_imagenet_transforms()
+    model = ViTForImageClassification.from_pretrained("google/vit-large-patch16-224-in21k")
+    input_dim = (3, 224, 224)
+    if features_nodes is None:
+        features_nodes = {"view": "pooler", "classifier": "classifier"}
+    return {
+        "model": model,
+        "features_nodes": features_nodes,
+        "input_dim": input_dim,
+        "test_transforms": test_transforms,
+        "train_transforms": train_transforms,
+    }
+
+def ViTHuge14ImageNet(features_nodes=None):
+    train_transforms, test_transforms = _get_default_imagenet_transforms()
+    model = ViTForImageClassification.from_pretrained("google/vit-huge-patch14-224-in21k")
+    input_dim = (3, 224, 224)
+    if features_nodes is None:
+        features_nodes = {"view": "pooler", "classifier": "classifier"}
+    return {
+        "model": model,
+        "features_nodes": features_nodes,
+        "input_dim": input_dim,
+        "test_transforms": test_transforms,
+        "train_transforms": train_transforms,
+    }
+
+
+def DenseNet121Cifar10(features_nodes=None):
+    model = densenet.DenseNet121Small(10)
+    train_transforms, test_transforms = _get_default_cifar10_transforms()
+    input_dim = (3, 32, 32)
+    if features_nodes is None:
+        features_nodes = {"view": "features", "linear": "linear"}
+    return {
+        "model": model,
+        "features_nodes": features_nodes,
+        "input_dim": input_dim,
+        "test_transforms": test_transforms,
+        "train_transforms": train_transforms,
+    }
+
+
+def DenseNet121Cifar100(features_nodes=None):
+    model = densenet.DenseNet121Small(100)
+    train_transforms, test_transforms = _get_default_cifar100_transforms()
+    input_dim = (3, 32, 32)
+    if features_nodes is None:
+        features_nodes = {"view": "features", "linear": "linear"}
+    return {
+        "model": model,
+        "features_nodes": features_nodes,
+        "input_dim": input_dim,
+        "test_transforms": test_transforms,
+        "train_transforms": train_transforms,
+    }
     
 def ResNet34Cifar10(features_nodes=None):
     model = resnet.ResNet34(10)
@@ -49,9 +208,35 @@ def ResNet34Cifar10(features_nodes=None):
     }
 
 
+def ResNet34Cifar100(features_nodes=None):
+    model = resnet.ResNet34(100)
+    train_transforms, test_transforms = _get_default_cifar100_transforms()
+    input_dim = (3, 32, 32)
+    if features_nodes is None:
+        features_nodes = {"view": "features", "linear": "linear"}
+    return {
+        "model": model,
+        "features_nodes": features_nodes,
+        "input_dim": input_dim,
+        "test_transforms": test_transforms,
+        "train_transforms": train_transforms,
+    }
+
+
+
+
+
 
 models_registry = {
     "resnet34_cifar10": ResNet34Cifar10,
+    "resnet34_cifar100": ResNet34Cifar100,
+    "densenet121_cifar10": DenseNet121Cifar10,
+    "densenet121_cifar100": DenseNet121Cifar100,
+    "vit_base16_imagenet": ViTBase16ImageNet,
+    "vit_large16_imagenet": ViTLarge16ImageNet,
+    "vit_huge14_imagenet": ViTHuge14ImageNet,
+    "timm_vit_base16_imagenet": TimmViTBase16ImageNet,
+    "timm_vit_tiny16_imagenet": TimmViTTiny16ImageNet,
 }
 
 
@@ -98,7 +283,6 @@ def get_model(model_name: str,
         # Load the model weights
         checkpoint_path = os.path.join(checkpoint_dir, "best_mlp.pth")
 
-    
     elif (model_name == "resnet34") and (dataset_name == "gaussian_mixture"):
 
         checkpoint_dir = os.path.join(checkpoint_dir, 
@@ -118,12 +302,19 @@ def get_model(model_name: str,
         checkpoint_path = os.path.join(checkpoint_dir, "best_mlp.pth")
 
 
-    elif (model_name == "resnet34") and (dataset_name == "cifar10"):
+    elif (model_name in ["resnet34", "densenet121"]) and (dataset_name in["cifar10", "cifar100"]):
         model_essentials = get_model_essentials(model_name, dataset_name)
         model = model_essentials["model"]
         checkpoint_path = os.path.join(checkpoint_dir, "_".join([model_name, dataset_name]), str(model_seed), "best.pth")
-        
 
+
+    # Handle ViT variants
+    elif model_name.startswith(("vit_", "timm_vit_")) and dataset_name == "imagenet":
+        essentials = get_model_essentials(model_name, dataset_name)
+        model = essentials["model"]
+        return model
+
+        
     if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint file not found at {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
