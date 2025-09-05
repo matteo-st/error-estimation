@@ -194,3 +194,6 @@ code/utils/dataset/old
 code/1d_example.ipynb
 code/utils/plot_results.ipynb
 results/imagenet
+code/detection_imagenet.py
+code/detection_parallel.py
+code/detection_synth_split.py
