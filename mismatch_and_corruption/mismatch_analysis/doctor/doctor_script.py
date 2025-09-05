@@ -74,18 +74,25 @@ if __name__ == "__main__":
 
     match_trainset, match_testset, _ = data_tools.get_data(
         match_dataset_name, data_path)
+    print("Match train set size:", len(match_trainset))
+    print("Match test set size:", len(match_testset))
 
     match_trainloader = torch.utils.data.DataLoader(
         match_trainset, batch_size=batch_size, shuffle=False, num_workers=2, generator=torch_gen)
 
     _, match_tr_labels, match_tr_predictions, _ = ml_tools.get_logits_labels_preds_data(
         net, match_trainloader, device)
+    print("Match train set predictions size:", len(match_tr_predictions))
+    print("Match train set labels size:", len(match_tr_labels))
 
     match_testloader = torch.utils.data.DataLoader(
         match_testset, batch_size=batch_size, shuffle=False, num_workers=2, generator=torch_gen)
 
     _, match_ts_targets, match_ts_predictions, _ = ml_tools.get_logits_labels_preds_data(
         net, match_testloader, device)
+    print("Match test set targets size:", len(match_ts_targets))
+    print("Match test set predictions size:", len(match_ts_predictions))
+
     # save the match test targets and predictions
     torch.save(match_ts_targets, os.path.join(
         dest_folder, "match_ts_targets.pt"))
@@ -109,18 +116,26 @@ if __name__ == "__main__":
 
     mismatch_trainset, mismatch_testset, _ = data_tools.get_data(
         mismatch_dataset_name, data_path)
+    print("Mismatch train set size:", len(mismatch_trainset))
+    print("Mismatch test set size:", len(mismatch_testset))
 
     mismatch_trainloader = torch.utils.data.DataLoader(
         mismatch_trainset, batch_size=batch_size, shuffle=False, num_workers=2, generator=torch_gen)
 
     _, mismatch_tr_labels, mismatch_tr_predictions, mismatch_tr_data = ml_tools.get_logits_labels_preds_data(
         net, mismatch_trainloader, device)
+    print("Mismatch train set predictions size:", len(mismatch_tr_predictions))
+    print("Mismatch train set labels size:", len(mismatch_tr_labels))
+    print("Mismatch train set data size:", len(mismatch_tr_data))
 
     mismatch_testloader = torch.utils.data.DataLoader(
         mismatch_testset, batch_size=batch_size, shuffle=False, num_workers=2, generator=torch_gen)
 
     _, mismatch_ts_labels, mismatch_ts_predictions, mismatch_ts_data = ml_tools.get_logits_labels_preds_data(
         net, mismatch_testloader, device)
+    print("Mismatch test set predictions size:", len(mismatch_ts_predictions))
+    print("Mismatch test set labels size:", len(mismatch_ts_labels))
+    print("Mismatch test set data size:", len(mismatch_ts_data))
 
     # print train and test accuracy of the out-distribution data
     logger.info(
@@ -132,6 +147,8 @@ if __name__ == "__main__":
     mismatch_labels = torch.cat(
         (mismatch_tr_labels, mismatch_ts_labels), dim=0)
     mismatch_data = torch.cat((mismatch_tr_data, mismatch_ts_data), dim=0)
+    print("Mismatch data size:", len(mismatch_data))
+    print("Mismatch labels size:", len(mismatch_labels))
 
     # create mismatch dataloader from the concatenated mismatch data and mismatch labels
     mismatch_dataloader = torch.utils.data.DataLoader(
@@ -153,9 +170,12 @@ if __name__ == "__main__":
 
         new_match_ts_logits, _, _, _ = ml_tools.get_logits_labels_preds_data(
             net, new_match_testloader, device)
+        print("New match test set logits size:", len(new_match_ts_logits))
+
 
         new_mismatch_logits, _, _, _ = ml_tools.get_logits_labels_preds_data(
             net, new_mismatch_loader, device)
+        print("New mismatch logits size:", len(new_mismatch_logits))
 
         for temperature in temperatures:
             compute_doctor_scores.compute_doctor_scores_for_magnitude_and_temperature(

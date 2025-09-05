@@ -1,10 +1,10 @@
 # utils/detection/factory.py
 
 # Make sure all your decorated classes register themselves:
-import synthetic_code.utils.detection.methods  
+import code.utils.detection.methods  
 import os
 
-from synthetic_code.utils.detection.registry import DETECTOR_REGISTRY
+from code.utils.detection.registry import DETECTOR_REGISTRY
 
 def get_detector(config: dict,
                  model,

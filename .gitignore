@@ -168,7 +168,6 @@ checkpoints/
 cluster/
 .vscode/
 **slurm*
-results/
 synth_results/
 synthetic_data
 synthetic_results
@@ -192,3 +191,6 @@ code/old
 code/utils/old
 code/utils/clustering/visualizations
 code/utils/dataset/old
+code/1d_example.ipynb
+code/utils/plot_results.ipynb
+results/imagenet

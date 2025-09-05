@@ -9,15 +9,15 @@ import umap
 import os
 import joblib
 from sklearn.decomposition import PCA
-from synthetic_code.utils.clustering.models import BregmanHard
-from synthetic_code.utils.clustering.divergences import (
+from code.utils.clustering.models import BregmanHard
+from code.utils.clustering.divergences import (
     euclidean,
     kullback_leibler,
     itakura_saito,
     alpha_divergence_factory,
 )
 
-from synthetic_code.utils.detection.registry import register_detector
+from code.utils.detection.registry import register_detector
 
 def gini(logits, temperature=1.0, normalize=False):
     g =torch.sum(torch.softmax(logits / temperature, dim=1) ** 2, dim=1, keepdim=True)
@@ -329,7 +329,7 @@ class PartitionDetector:
         elif self.method == "soft-kmeans":
             self.inertia = self.clustering_algo.lower_bound_
 
-        print("inertia", self.inertia)
+        # print("inertia", self.inertia)
         self.clustering(detector_labels, clusters)
         
 

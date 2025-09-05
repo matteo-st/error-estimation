@@ -380,7 +380,7 @@ import torch
 from torch.utils.data import Dataset, TensorDataset
 from torchvision.datasets import CIFAR10, CIFAR100, SVHN, ImageNet
 from PIL import Image
-from synthetic_code.utils.models import get_model_essentials
+from code.utils.models import get_model_essentials
 
 def _get_default_cifar100_transforms():
     statistics = ((0.4914, 0.482158, 0.446531), (0.247032, 0.243486, 0.261588))
@@ -726,31 +726,6 @@ def get_synthetic_dataset(
                         f"dim-{dim}_classes-{n_classes}-seed-{seed}")
     return GaussianMixtureDataset(data_dir=data_dir, n_samples=n_samples)
 
-    # return GaussianMixtureDataset(n_samples, means, covs, weights, seed=seed)
-
-# def get_synthetic_dataset_old(model_name: str, # to get the test transform
-#                  checkpoint_dir: str = os.path.join(CHECKPOINTS_DIR_BASE, "ce"),
-#                  n_samples = 1000,
-#                  seed: int = 0,
-#                  device: str = "cpu") -> Dataset:
-    
-#     checkpoint_dir = os.path.join(checkpoint_dir, model_name)
-#     config_model_path = os.path.join(checkpoint_dir, "config.json")
-
-#     if not os.path.exists(config_model_path):
-#         raise FileNotFoundError(f"Configuration file not found at {config_model_path}")
-#     # Load the configuration file
-#     with open(config_model_path, "r") as f:
-#         config_model = json.load(f)
-
-#     means = torch.tensor(config_model["means"]).to(device)
-#     # stds = torch.tensor(config_model["stds"]).to(device)
-#     covs = torch.tensor(config_model["covs"]).to(device)
-#     weights = torch.tensor(config_model["weights"]).to(device)
-
-#     return GaussianMixtureDataset(n_samples, means, covs, weights, 
-#                                 #   seed=seed, device=device
-#                                   )
 
 
 
@@ -760,6 +735,7 @@ def get_dataset(dataset_name: str,
                  shuffle: bool = False,
                  random_state: int = 0,
                  train=False,
+                 transform="test",
                  **kwargs) -> Dataset:
 
     if dataset_name not in datasets_registry.keys():
@@ -769,18 +745,18 @@ def get_dataset(dataset_name: str,
          return datasets_registry[dataset_name](
             root, train=train, 
             download=True) 
-    test_transform = get_model_essentials(model_name, dataset_name)["test_transforms"]
+    transform = get_model_essentials(model_name, dataset_name)[f"{transform}_transforms"]
 
     if not shuffle:
         return datasets_registry[dataset_name](
             root, train=train, 
-            transform=test_transform, 
+            transform=transform, 
             download=True) 
     
     else:
         dataset = datasets_registry[dataset_name](
                 root, train=train, 
-                transform=test_transform, 
+                transform=transform, 
                 download=True) 
         # reproducible permutation
         gen = torch.Generator()

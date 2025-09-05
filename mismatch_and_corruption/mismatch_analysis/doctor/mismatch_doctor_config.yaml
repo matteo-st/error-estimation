@@ -6,9 +6,9 @@ data_path: "./data"
 device_id: !!int 0
 batch_size: !!int 1000
 rs: !!seq
-  - 10
-  - 5
-  - 3
+  # - 10
+  # - 5
+  # - 3
   - 2
 
 seeds: !!seq
@@ -23,7 +23,7 @@ seeds: !!seq
   # - 9
   # - 10
 temperatures: !!seq
-  - 1.
+  # - 1.
   - 1.1
   # - 1.2
   # - 1.3
