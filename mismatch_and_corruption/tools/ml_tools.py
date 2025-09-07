@@ -103,6 +103,17 @@ class DenseNet121Torchvision(TorchvisionModel):
     def forward(self, x):
         return self.model(x)
 
+class ResNet34Torchvision(TorchvisionModel):
+    def __init__(self, pretrained=True):
+        super(ResNet34Torchvision, self).__init__()
+        self.model = models.resnet34(pretrained=pretrained)
+
+    def get_model(self):
+        return self.model
+
+    def forward(self, x):
+        return self.model(x)
+
 
 class DenseNet121Custom(TorchvisionModel):
     def __init__(self, checkpoint_path=None, num_classes=10):
@@ -139,8 +150,9 @@ def get_model_(model_name, **kwargs):
         return DenseNet121Torchvision(pretrained=kwargs['pretrained'])
     elif model_name == 'densenet121_custom' or model_name == 'densenet121_custom_lognorm' or model_name == 'densenet121_custom_mixup' or model_name == 'densenet121_custom_regmixup':
         return DenseNet121Custom(checkpoint_path=kwargs['checkpoint_path'], num_classes=kwargs['num_classes'])
-    elif model_name == 'resnet34_custom' or model_name == 'resnet34_custom_lognorm' or model_name == 'resnet34_custom_mixup' or model_name == 'resnet34_custom_regmixup':
+    elif model_name == 'resnet34' or model_name == 'resnet34_custom' or model_name == 'resnet34_custom_lognorm' or model_name == 'resnet34_custom_mixup' or model_name == 'resnet34_custom_regmixup':
         return ResNet34Custom(checkpoint_path=kwargs['checkpoint_path'], num_classes=kwargs['num_classes'])
+
     else:
         raise NotImplementedError
     

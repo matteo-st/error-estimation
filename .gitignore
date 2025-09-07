@@ -127,6 +127,8 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+myenv_old
+myenv
 
 # Spyder project settings
 .spyderproject
@@ -166,7 +168,6 @@ checkpoints/
 cluster/
 .vscode/
 **slurm*
-results/
 synth_results/
 synthetic_data
 synthetic_results
@@ -177,4 +178,22 @@ images/
 nohup.out
 data/
 myenv/
-code/
+mismatch_and_corruption/
+
+requirements_from_311_clean.txt
+requirements_from_311.txt
+
+.python-version
+
+code/utils/theory/
+code/utils/test_metrics.ipynb
+code/old
+code/utils/old
+code/utils/clustering/visualizations
+code/utils/dataset/old
+code/1d_example.ipynb
+code/utils/plot_results.ipynb
+results/imagenet
+code/detection_imagenet.py
+code/detection_parallel.py
+code/detection_synth_split.py
