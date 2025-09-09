@@ -197,3 +197,5 @@ results/imagenet
 code/detection_imagenet.py
 code/detection_parallel.py
 code/detection_synth_split.py
+results/cifar10_knn
+results/cifar10_logistic

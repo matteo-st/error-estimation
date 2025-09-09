@@ -394,6 +394,181 @@ class PartitionDetector:
         #     self.clusters = cluster
         return detector_preds
 
+
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.linear_model import LogisticRegression
+
+
+
+@register_detector("logistic")
+class BaseDetector:
+    def __init__(self, model, device=torch.device('cpu'), regressor=LogisticRegression, 
+                 penalty="l2", C=1, reorder_embs=True, temperature=1, feature_space="probits", **kwargs):
+        self.model = model.to(device)
+        self.device = device
+        self.penalty = penalty
+        self.C = C
+        self.temperature = temperature
+        self.feature_space = feature_space
+        self.reorder_embs = reorder_embs
+        self.regressor = regressor(
+            penalty=self.penalty, C=self.C, solver="saga") 
+
+    
+    def _extract_embeddings(self, x=None, logits=None):
+        """
+        Extract embeddings from the model.
+        This function is used to create a feature extractor.
+        """
+
+        if logits is not None:
+            if self.feature_space == "gini":
+                embs = gini(logits, temperature=self.temperature, normalize=self.normalize_gini)
+            elif self.feature_space == "probits":
+                embs = torch.softmax(logits / self.temperature, dim=1)
+        else:
+            logits = self.model(x)
+            if self.feature_space == "gini":
+                embs = gini(logits, temperature=self.temperature, normalize=self.normalize_gini)
+            elif self.feature_space == "probits":
+                embs = torch.softmax(logits / self.temperature, dim=1)
+            else:
+                raise ValueError("Unsupported partionning space") 
+            
+        if self.reorder_embs:
+            embs = embs.sort(dim=1, descending=True)[0]
+        return embs
+         
+    @torch.no_grad()
+    def fit(self, data_loader=None, logits=None, detector_labels=None, verbose=False):
+
+        self.model.eval()
+        
+        if data_loader is not None:
+            all_logits = []
+            all_detector_labels = []
+            
+            for inputs, targets in tqdm(data_loader, total=len(data_loader), desc="Getting Training Logits", disable=False):
+                    inputs = inputs.to(self.device)
+                    targets = targets.to(self.device)
+                
+                    logits = self.model(inputs).cpu()  # logits: [batch_size, num_classes]
+                    model_preds = torch.argmax(logits, dim=1)
+
+                    detector_labels = (model_preds != targets.cpu()).float()
+                    # all_model_preds.append(model_preds)
+                    all_detector_labels.append(detector_labels)
+                    all_logits.append(logits)
+            
+        
+            # all_model_preds = torch.cat(all_model_preds, dim=0)
+            all_detector_labels = torch.cat(all_detector_labels, dim=0)
+            all_logits = torch.cat(all_logits, dim=0)
+        else:
+            assert logits is not None and detector_labels is not None
+            all_logits = logits.cpu()
+            all_detector_labels = detector_labels.cpu()
+
+        all_embs = self._extract_embeddings(logits=all_logits)
+        self.regressor.fit(all_embs.numpy(), all_detector_labels.numpy())
+
+    def __call__(self, x=None, logits=None):
+        embs = self._extract_embeddings(x, logits)
+        preds = self.regressor.predict_proba(embs.cpu().numpy())[:, 1]
+        return preds
+
+
+
+@register_detector("knn")
+class BaseDetector:
+    def __init__(self, model, device=torch.device('cpu'), regressor=KNeighborsClassifier, 
+                 n_neighbors=50, weights="uniform", p=2, metric=2, magnitude=0, 
+                 space="probits", reorder_embs=True, temperature=1, **kwargs):
+        self.model = model.to(device)
+        self.device = device
+        self.magnitude = magnitude
+        self.partionning_space = space
+        self.reorder_embs = reorder_embs
+        self.n_neighbors = n_neighbors
+        self.weights = weights
+        self.p = p
+    
+        if p is None:
+            self.metric = metric
+        else:
+            self.metric = "minkowski"
+        self.temperature = temperature
+        self.regressor = regressor(
+            n_neighbors=self.n_neighbors, 
+            weights=self.weights, 
+            p=self.p, 
+            metric=self.metric) 
+
+    
+    def _extract_embeddings(self, x=None, logits=None):
+        """
+        Extract embeddings from the model.
+        This function is used to create a feature extractor.
+        """
+
+        if logits is not None:
+            if self.partionning_space == "gini":
+                embs = gini(logits, temperature=self.temperature, normalize=self.normalize_gini)
+            elif self.partionning_space == "probits":
+                embs = torch.softmax(logits / self.temperature, dim=1)
+        else:
+            logits = self.model(x)
+            if self.partionning_space == "gini":
+                embs = gini(logits, temperature=self.temperature, normalize=self.normalize_gini)
+            elif self.partionning_space == "probits":
+                embs = torch.softmax(logits / self.temperature, dim=1)
+            else:
+                raise ValueError("Unsupported partionning space") 
+            
+        if self.reorder_embs:
+            embs = embs.sort(dim=1, descending=True)[0]
+        return embs
+         
+    @torch.no_grad()
+    def fit(self, data_loader=None, logits=None, detector_labels=None, verbose=False):
+
+        self.model.eval()
+        
+        if data_loader is not None:
+            all_logits = []
+            all_detector_labels = []
+            
+            for inputs, targets in tqdm(data_loader, total=len(data_loader), desc="Getting Training Logits", disable=False):
+                    inputs = inputs.to(self.device)
+                    targets = targets.to(self.device)
+                
+                    logits = self.model(inputs).cpu()  # logits: [batch_size, num_classes]
+                    model_preds = torch.argmax(logits, dim=1)
+
+                    detector_labels = (model_preds != targets.cpu()).float()
+                    # all_model_preds.append(model_preds)
+                    all_detector_labels.append(detector_labels)
+                    all_logits.append(logits)
+            
+        
+            # all_model_preds = torch.cat(all_model_preds, dim=0)
+            all_detector_labels = torch.cat(all_detector_labels, dim=0)
+            all_logits = torch.cat(all_logits, dim=0)
+        else:
+            assert logits is not None and detector_labels is not None
+            all_logits = logits.cpu()
+            all_detector_labels = detector_labels.cpu()
+
+        all_embs = self._extract_embeddings(logits=all_logits)
+        self.regressor.fit(all_embs.numpy(), all_detector_labels.numpy())
+
+    def __call__(self, x=None, logits=None):
+        embs = self._extract_embeddings(x, logits)
+        preds = self.regressor.predict_proba(embs.cpu().numpy())[:, 1]
+        return preds
+
+    
+
 # @register_detector("clustering")
 # class PartitionDetector:
 #     def __init__(

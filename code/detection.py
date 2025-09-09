@@ -52,7 +52,7 @@ def make_config_list(base_config: dict, parameter_space: dict | None) -> list[di
     if not parameter_space:                     # covers {}, None
         return [deepcopy(base_config)]
 
-    keys = list(parameter_space.keys())
+    keys, values = zip(*parameter_space.items()) 
     grid = [dict(zip(keys, combo)) for combo in product(*values)]
     list_configs = []
     for params in grid:
@@ -87,7 +87,7 @@ def _prepare_config_for_results(config, experiment_nb=None):
     else:
         config["experiment"]["folder"] = "bwe"
 
-    list_methods = ["gini", "metric_learning", "clustering", "bayes", "max_proba"]
+    list_methods = ["gini", "metric_learning", "clustering", "bayes", "max_proba","knn", "logistic"]
     method_name = config.get("method_name")
 
     if method_name not in list_methods:
@@ -288,7 +288,7 @@ def main(list_configs, base_config, seed_splits):
         evaluator_train = MultiDetectorEvaluator(
             model, train_loader, device, 
             magnitudes=[config[method_name].get("magnitude", 0) for config in list_configs],
-            suffix="train"
+            suffix="train",
             )
         list_train_results = evaluator_train.evaluate(detectors)
 
@@ -332,7 +332,7 @@ if __name__ == "__main__":
             "name" : "resnet34", # mlp_synth_dim-10_classes-7, timm_vit_tiny16, timm_vit_base16
             "model_seed" : 1,
                    },
-        "method_name" : "clustering",
+        "method_name" : "logistic",
         "metric_learning" : {
             "lbd" : 0.8, 
             "temperature" : 1.1,
@@ -367,19 +367,37 @@ if __name__ == "__main__":
                 "seed" : 0,
                 }
             },
-  
+            "knn" : {
+                "n_neighbors" : 50,
+                "weights" : "distance", # uniform or distance
+                "p" : 2, # 0.1
+                "metric" : "minkowski",
+                "magnitude" : 0, # 0.1
+                "space" : "probits", # "feature" or "classifier"
+                "reorder_embs" : False, # True or False,
+                "temperature" : 1
+            },
+            "logistic" : {
+                "penalty" : "l2", # l1, l2, elasticnet
+                "C" : 1,
+                "reorder_embs" : False, # True or False,
+                "space" : "probits", # "feature" or "classifier"
+                "temperature" : 1,
+                "feature_space": "probits"
+            }
             }
     
-    results_file = "synth_results/test/all_results.csv" # "synth_results/resnet3072_test/all_results.csv"  
+    results_file = "results/cifar10_logistic/all_results.csv" # "synth_results/resnet3072_test/all_results.csv"  
     experiment_folder = None
 
     # Don't put seed_splits in parameter_space !
-    seed_splits = list(range(1, 2))  # [1, 2, 3, 4, 5]
+    seed_splits = list(range(1, 10))  # [1, 2, 3, 4, 5]
 
     # Hyperparameter grid
-    n_clusters = [100, 200, 300, 400, 500]
-    magnitudes = [0 + 0.001 * i for i in range(1, 30)] 
-    temperatures = [0.1 + 0.05 * i for i in range(40)]
+    n_neighbors = [10, 20, 30, 40, 50, 60, 80, 100]
+    # magnitudes = [0 + 0.001 * i for i in range(1, 30)] 
+    temperatures = [1 + 0.2 * i for i in range(10)]
+    weights = ["uniform", "distance"]
 
     parameter_space = {
         # 'metric_learning.magnitude': [0.00001 + 0.00001 * i for i in range(100)],  # 0.1, 0.2, ..., 1.0
@@ -387,6 +405,15 @@ if __name__ == "__main__":
         # 'metric_learning.magnitudes': magnitudes,
         # 'data.name' : ["cifar10", "cifar100"],
         # 'gini.magnitude': magnitudes,
+        # 'knn.n_neighbors': n_neighbors,
+        # 'knn.weights': weights,
+        # 'knn.p': [1, 2, 3],
+        # 'knn.temperature': temperatures,
+        'logistic.penalty': ["l1", "l2"],
+        'logistic.C': [0.001, 0.005, 0.01, 0.05, 0.1, 1, 10, 100],
+        'logistic.reorder_embs': [True, False],
+        # 'logistic.temperature': temperatures,
+      
         # 'gini.temperature': temperatures,
         # 'data.transform': ["test", "custom1"]
         # 'max_proba.temperature': [0.1 + 0.1 * i for i in range(40)],  # 0.1, 0.2, ..., 1.0
