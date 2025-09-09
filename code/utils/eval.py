@@ -168,6 +168,18 @@ class DetectorEvaluator:
             np.squeeze(all_detector_preds),
             np.squeeze(all_model_preds), 
             all_labels)
+        
+        
+        # prepend (0, 0) if missing
+        if coverages.size == 0 or coverages[0] > 0.0:
+            coverages = np.r_[0.0, coverages]
+            risks = np.r_[0.0, risks]
+
+        # append (1, overall_err) if missing
+        if coverages[-1] < 1.0:
+            overall_err = (all_model_preds != all_labels).mean()
+            coverages = np.r_[coverages, 1.0]
+            risks = np.r_[risks, overall_err]
         aurc = auc(coverages, risks)
     
         aupr_err = average_precision_score(all_detector_labels, all_detector_preds)
@@ -188,7 +200,8 @@ class MultiDetectorEvaluator:
         dataloader: torch.utils.data.DataLoader,
         device: torch.device,
         magnitudes,
-        suffix = "train"
+        suffix = "train",
+        scores = None
     ):
         """
         Evaluate a single model against multiple post-hoc detectors.
@@ -205,6 +218,7 @@ class MultiDetectorEvaluator:
         self.device = device
         self.magnitude = magnitudes
         self.suffix = suffix
+        self.scores = None  # Precomputed scores, if an
 
     @staticmethod
     def _fpr_at_tpr(fprs, tprs, thrs, level: float = 0.95):
@@ -213,35 +227,8 @@ class MultiDetectorEvaluator:
         idx = idxs.min() if idxs.size else 0
         return float(fprs[idx]), float(tprs[idx]), float(thrs[idx])
 
-    def evaluate(self, detectors):
-        """
-        Run the model once per batch, then each detector on those inputs.
+    def get_scores(self, detectors, n_samples, n_det):
 
-        Args:
-            detectors:  Either a list of detector‐objects or a dict name→detector.
-                        Each detector must be callable as:
-                            scores = detector(inputs=..., logits=...)
-                        and return a 1‐D tensor of “outlier scores” (higher = more likely error).
-
-        Returns:
-            results: dict mapping detector_name → metrics dict, e.g.
-                {
-                  "ODIN": {
-                      "fpr@95tpr": 0.12,
-                      "roc_auc": 0.94,
-                      "aupr_err": 0.88,
-                      "aupr_in": 0.90,
-                      "aurc": 0.23,
-                      "model_acc": 0.79,  # same for all detectors
-                  },
-                  …
-                }
-        """
-        # normalize detectors into an ordered dict name→detector
-
-        # storage
-        n_det = len(detectors)
-        n_samples = len(self.loader.dataset)
         all_scores = [np.zeros(n_samples, dtype=float) for _ in range(n_det)]
         # detector_labels = model_pred != true_label  (same for all detectors)
         all_labels = np.zeros(n_samples, dtype=int)
@@ -287,11 +274,57 @@ class MultiDetectorEvaluator:
                 else:
                     with torch.no_grad():
                         scores = det(logits=logits)
-
-                all_scores[i][idx: idx+bs] = scores.cpu().numpy()
+                if isinstance(scores, torch.Tensor):
+                    scores = scores.cpu().numpy()
+                all_scores[i][idx: idx+bs] = scores
 
             idx += bs
 
+        self.scores = {
+            "scores": all_scores,
+            "labels": all_labels,
+            "model_preds": all_model_preds,
+            "detector_labels": detector_labels_arr
+        } 
+
+
+    def evaluate(self, detectors):
+        """
+        Run the model once per batch, then each detector on those inputs.
+
+        Args:
+            detectors:  Either a list of detector‐objects or a dict name→detector.
+                        Each detector must be callable as:
+                            scores = detector(inputs=..., logits=...)
+                        and return a 1‐D tensor of “outlier scores” (higher = more likely error).
+
+        Returns:
+            results: dict mapping detector_name → metrics dict, e.g.
+                {
+                  "ODIN": {
+                      "fpr@95tpr": 0.12,
+                      "roc_auc": 0.94,
+                      "aupr_err": 0.88,
+                      "aupr_in": 0.90,
+                      "aurc": 0.23,
+                      "model_acc": 0.79,  # same for all detectors
+                  },
+                  …
+                }
+        """
+        # normalize detectors into an ordered dict name→detector
+
+        # storage
+        n_det = len(detectors)
+        n_samples = len(self.loader.dataset)
+        if self.scores is None:
+            self.get_scores(detectors, n_samples, n_det)
+
+        all_scores = self.scores["scores"]
+        all_labels = self.scores["labels"]
+        all_model_preds = self.scores["model_preds"]
+        detector_labels_arr = self.scores["detector_labels"]  # bool array
+    
 
         # common model accuracy
         model_acc = float((all_model_preds == all_labels).mean())
@@ -308,6 +341,18 @@ class MultiDetectorEvaluator:
             risks, coverages, _ = risks_coverages_selective_net(
                 scores, all_model_preds, all_labels
             )
+
+                    
+            # prepend (0, 0) if missing
+            if coverages.size == 0 or coverages[0] > 0.0:
+                coverages = np.r_[0.0, coverages]
+                risks = np.r_[0.0, risks]
+
+            # append (1, overall_err) if missing
+            if coverages[-1] < 1.0:
+                overall_err = (all_model_preds != all_labels).mean()
+                coverages = np.r_[coverages, 1.0]
+                risks = np.r_[risks, overall_err]
             aurc = float(auc(coverages, risks))
 
             results = pd.DataFrame([{
