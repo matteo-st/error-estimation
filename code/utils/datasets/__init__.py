@@ -737,7 +737,7 @@ def get_dataset(dataset_name: str,
                  train=False,
                  transform="test",
                  **kwargs) -> Dataset:
-
+    
     if dataset_name not in datasets_registry.keys():
         raise ValueError(f"Dataset {dataset_name} not found")
 
@@ -746,7 +746,7 @@ def get_dataset(dataset_name: str,
             root, train=train, 
             download=True) 
     transform = get_model_essentials(model_name, dataset_name)[f"{transform}_transforms"]
-
+    # print("transform", transform)
     if not shuffle:
         return datasets_registry[dataset_name](
             root, train=train, 

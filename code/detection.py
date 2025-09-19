@@ -278,7 +278,7 @@ def main(list_configs, base_config, seed_splits):
         detectors = [get_detector(deepcopy(config), model, device, experiment_folder, CHECKPOINTS_DIR_BASE) for config in list_configs]
 
         multi_detector = MultiDetectors(
-            detectors=detectors, model=model, device=device
+            detectors=detectors, model=model, device=device, base_config=base_config, seed_split=seed_split
         )
         if hasattr(detectors[0], "fit"):
             multi_detector.fit(train_loader)
@@ -289,13 +289,15 @@ def main(list_configs, base_config, seed_splits):
             model, train_loader, device, 
             magnitudes=[config[method_name].get("magnitude", 0) for config in list_configs],
             suffix="train",
+            base_config=base_config, seed_split=seed_split
             )
         list_train_results = evaluator_train.evaluate(detectors)
 
         evaluator_val = MultiDetectorEvaluator(
             model, val_loader, device, 
                     magnitudes=[config[method_name].get("magnitude", 0) for config in list_configs],
-            suffix="val"
+            suffix="val",
+            base_config=base_config, seed_split=seed_split
                     )
         list_val_results = evaluator_val.evaluate(detectors)
 
@@ -312,12 +314,12 @@ if __name__ == "__main__":
     base_config = {
         "seed" : 1,
         "data" : {
-            "name" : "cifar10", # gaussian_mixture or cifar10
+            "name" : "imagenet", # gaussian_mixture or cifar10
             "n_classes" : 10, # 10 classes for gaussian_mixture
             "dim" : 3072, # 3072
             "n_samples" : 10000,
             "seed" : None,
-            "seed_split" : 1,
+            "seed_split" : 9,
             "r" : 2,
             # "n_samples_train" : 5000,
             # "n_samples_test" : 5000,
@@ -329,10 +331,10 @@ if __name__ == "__main__":
             # "transform": "test"
                   },
         "model" : {
-            "name" : "resnet34", # mlp_synth_dim-10_classes-7, timm_vit_tiny16, timm_vit_base16
+            "name" : "timm_vit_tiny16", # mlp_synth_dim-10_classes-7, timm_vit_tiny16, timm_vit_base16
             "model_seed" : 1,
                    },
-        "method_name" : "logistic",
+        "method_name" : "clustering",
         "metric_learning" : {
             "lbd" : 0.8, 
             "temperature" : 1.1,
@@ -350,7 +352,7 @@ if __name__ == "__main__":
         "clustering" : {
             "name" : "soft-kmeans", # "kmeans", "soft-kmeans", "bregman-hard"
             "distance" : None, # "euclidean", "kl", "js", "alpha-divergence"
-            "n_clusters" : 70,
+            "n_clusters" : 200,
             "reorder_embs" : True, # True or False
             "seed" : 0,
             "alpha" : 0.05,
@@ -358,7 +360,7 @@ if __name__ == "__main__":
             "n_init" : 5,
             "space" : "probits", # "feature" or "classifier"
             "cov_type" : "diag",
-            "temperature" : 7.1,
+            "temperature" : 1,
             "normalize_gini" : False,
             "reduction" : {
                 "name" : None, # umap
@@ -387,12 +389,12 @@ if __name__ == "__main__":
             }
             }
     
-    results_file = "results/cifar10_logistic/all_results.csv" # "synth_results/resnet3072_test/all_results.csv"  
+    results_file = "results/imagenet_aug/all_results.csv" # "synth_results/resnet3072_test/all_results.csv"  
     experiment_folder = None
 
     # Don't put seed_splits in parameter_space !
-    seed_splits = list(range(1, 10))  # [1, 2, 3, 4, 5]
-
+    seed_splits = list(range(1, 2))  # [1, 2, 3, 4, 5]
+    seed_splits = [9]
     # Hyperparameter grid
     n_neighbors = [10, 20, 30, 40, 50, 60, 80, 100]
     # magnitudes = [0 + 0.001 * i for i in range(1, 30)] 
@@ -409,9 +411,9 @@ if __name__ == "__main__":
         # 'knn.weights': weights,
         # 'knn.p': [1, 2, 3],
         # 'knn.temperature': temperatures,
-        'logistic.penalty': ["l1", "l2"],
-        'logistic.C': [0.001, 0.005, 0.01, 0.05, 0.1, 1, 10, 100],
-        'logistic.reorder_embs': [True, False],
+        # 'logistic.penalty': ["l1", "l2"],
+        # 'logistic.C': [0.001, 0.005, 0.01, 0.05, 0.1, 1, 10, 100],
+        # 'logistic.reorder_embs': [True, False],
         # 'logistic.temperature': temperatures,
       
         # 'gini.temperature': temperatures,

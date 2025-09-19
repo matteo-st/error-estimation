@@ -5,6 +5,7 @@ from sklearn.utils import check_random_state
 from .divergences import euclidean, kullback_leibler, itakura_saito, alpha_divergence_factory
 
 
+
 class BregmanHard(BaseEstimator, ClusterMixin):
     def __init__(
         self,
@@ -120,7 +121,9 @@ class BregmanHard(BaseEstimator, ClusterMixin):
         if self.has_cov:
             D = self.divergence(X, centers, self.cov)
         else:
+  
             D = self.divergence(X, centers)
+       
         return np.argmin(D, axis=1)
 
     def _update_centroids(self, X, labels):

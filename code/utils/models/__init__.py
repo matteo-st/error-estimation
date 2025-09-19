@@ -123,6 +123,9 @@ def TimmViTTiny16ImageNet(features_nodes=None):
     # get model specific transforms (normalization, resize)
     data_config = timm.data.resolve_model_data_config(model)
     transforms = timm.data.create_transform(**data_config, is_training=False)
+    print("data_config", data_config)
+    print("transforms", transforms)
+    # exit()
     input_dim = (3, 224, 224)
     if features_nodes is None:
         features_nodes = {"view": "pooler", "classifier": "classifier"}
