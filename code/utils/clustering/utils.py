@@ -24,10 +24,29 @@ class ClusterResult(NamedTuple):
     labels: LongTensor
     centers: Tensor
     inertia: Tensor
-    x_org: Tensor
-    x_norm: Tensor
     k: LongTensor
-    soft_assignment: Optional[Tensor] = None
+
+
+
+class SoftClusterResult(NamedTuple):
+    """Named and typed result tuple for kmeans algorithms
+
+    Args:
+        resp: label for each sample in x
+        centers: corresponding coordinates of cluster centers
+        inertia: sum of squared distances of samples to their closest cluster center
+        x_org: original x
+        x_norm: normalized x which was used for cluster centers and labels
+        k: number of clusters
+        soft_assignment: assignment probabilities of soft kmeans
+    """
+
+    log_resp: Tensor
+    weights: Tensor
+    means: Tensor
+    cov_diags: Tensor
+    lower_bound: Tensor
+    k: LongTensor
 
 
 @torch.jit.script
@@ -51,9 +70,9 @@ def group_by_label_mean(
     assert isinstance(x, Tensor)
     assert isinstance(labels, Tensor)
     assert isinstance(k_max_range, Tensor)
-    bs, n, d = x.size()
-    bs_, m, n_ = labels.size()
-    assert bs == bs_ and n == n_
+    n, d = x.size()
+    bs, m, n_ = labels.size()
+    assert  n == n_
     k_max = k_max_range.size(-1)
     M = (
         (

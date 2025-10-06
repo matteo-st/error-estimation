@@ -5,6 +5,116 @@ from time import strftime, localtime
 import os
 import pandas as pd
 
+import re
+import glob
+
+
+
+def read_table(
+    data_name=None,
+    model_name=None,
+    method_name=None,
+    r=None,
+    seed_split=None,
+    n_epochs=None,
+    transform=None,
+    hyperparam=True,
+    expe_folder=None,
+    n_folds=None,
+    space=None,
+    distance=None,
+    clustering_name=None,
+    normalize_gini=None,
+    num=None,
+):
+    """
+    Load and concatenate all matching result CSVs from `expe_folder`.
+
+    Matching patterns:
+      - hyperparam=True  -> 'hyperparams_results*.csv'
+      - hyperparam=False -> 'results_opt_fpr*.csv'
+
+    Adds:
+      - file_num (int): 0 for base file, i for '_i' files
+      - source_file (str): basename of the CSV
+
+    If `num` is provided, only that specific file is read (and annotated).
+    """
+
+    # ----- Build experiment folder if not provided -----
+    if expe_folder is None:
+        if any(v is None for v in [data_name, model_name, method_name, r, seed_split]):
+            raise ValueError("When expe_folder is None, provide data_name, model_name, method_name, r, seed_split.")
+        root = f"../../results/{data_name}_{model_name}_r-{r}_seed-split-{seed_split}"
+        if method_name in ["clustering", "metric_learning", "random_forest"]:
+            if any(v is None for v in [transform, n_epochs, n_folds, space]):
+                raise ValueError("transform, n_epochs, n_folds, space required for these methods when expe_folder is None.")
+            root += f"/transform-{transform}_n-epoch{n_epochs}_n-folds{n_folds}_{space}"
+            if method_name == "clustering":
+                if distance is not None:
+                    root += f"_distance-{distance}"
+                if clustering_name != "soft-kmeans":
+                    root += f"_{clustering_name}"
+        elif method_name == "gini":
+            if any(v is None for v in [transform, normalize_gini]):
+                raise ValueError("transform and normalize_gini required for method 'gini' when expe_folder is None.")
+            root += f"/transform-{transform}_normalize-{normalize_gini}"
+        else:
+            if transform is None:
+                raise ValueError("transform is required when expe_folder is None.")
+            root += f"/transform-{transform}"
+        expe_folder = root + f"_{method_name}"
+
+    base_name = "hyperparams_results" if hyperparam else "results_opt_fpr"
+    rx = re.compile(rf"{re.escape(base_name)}(?:_(\d+))?\.csv$")
+
+    # If `num` is specified, read that specific file only (annotated).
+    if num is not None:
+        # Allow num==0 or '' to mean base file (no suffix)
+        fname = f"{base_name}.csv" if str(num) in ("", "0") else f"{base_name}_{num}.csv"
+        target = os.path.join(expe_folder, fname)
+        if not os.path.isfile(target):
+            raise FileNotFoundError(f"No such file: {target}")
+        df = pd.read_csv(target)
+        # annotate
+        m = rx.search(os.path.basename(target))
+        file_num = int(m.group(1)) if (m and m.group(1) is not None) else 0
+        df = df.copy()
+        df["file_num"] = file_num
+        df["source_file"] = os.path.basename(target)
+        return df
+
+    # Otherwise, gather *all* matching files.
+    pattern = os.path.join(expe_folder, f"{base_name}*.csv")
+    files = [f for f in glob.glob(pattern) if rx.search(os.path.basename(f))]
+
+    if not files:
+        raise FileNotFoundError(f"No matching files found with pattern: {pattern}")
+
+    def sort_key(p):
+        m = rx.search(os.path.basename(p))
+        idx = m.group(1)
+        return (0 if idx is None else 1, int(idx) if idx is not None else -1)
+
+    files.sort(key=sort_key)
+
+    dfs = []
+    for fpath in files:
+        try:
+            df_i = pd.read_csv(fpath)
+        except Exception as e:
+            raise RuntimeError(f"Failed to read '{fpath}': {e}") from e
+
+        m = rx.search(os.path.basename(fpath))
+        file_num = int(m.group(1)) if (m and m.group(1) is not None) else 0
+
+        df_i = df_i.copy()
+        df_i["file_num"] = file_num
+        df_i["source_file"] = os.path.basename(fpath)
+        dfs.append(df_i)
+
+    return pd.concat(dfs, axis=0, ignore_index=True)
+
 def append_results_to_file(config, train_results, val_results, result_file):
 
     config = _prepare_config_for_results(config)

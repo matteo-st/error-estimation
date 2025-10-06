@@ -25,7 +25,8 @@ warnings.filterwarnings(
     message=".*force_all_finite.*"
 )
 
-GPU_ID = 0
+GPU_ID = 1
+
 # N_THREADS = 8
 # os.environ["OMP_NUM_THREADS"]   = f"{N_THREADS}"
 # os.environ["MKL_NUM_THREADS"]   = f"{N_THREADS}"
@@ -124,11 +125,17 @@ def prepare_dataloaders(
         random.shuffle(perm)
 
     n_train_samples = int(n // ratio)
+    n_train_samples = int(n * base_config["data"]["ratio_calib"])
     # n_train_samples = 7000
+    # n_calib = int(n_train_samples * 0.90) 
+    # n_train_samples = n_train_samples - n_calib
     train_idx = perm[:n_train_samples]
+    # calib_idx = perm[n_train_samples:n_train_samples + n_calib]
     test_idx = perm[n_train_samples:]
+    # test_idx = perm[n_train_samples + n_calib:]
 
     train_dataset = Subset(dataset, train_idx)
+    # calib_dataset = Subset(dataset, calib_idx)
     test_dataset = Subset(dataset, test_idx)
     #test_dataset = torch.utils.data.Subset(test_dataset, range(len(test_dataset) // 5, len(test_dataset)))
 
@@ -143,6 +150,9 @@ def prepare_dataloaders(
     train_loader = DataLoader(
         train_dataset, batch_size=batch_size_train, shuffle=False, pin_memory=True, num_workers=10
     )
+    # calib_loader = DataLoader(
+    #     calib_dataset, batch_size=batch_size_test, shuffle=False, pin_memory=True, num_workers=10
+    # )
 
     val_loader = DataLoader(
         test_dataset, batch_size=batch_size_test, shuffle=False, pin_memory=True, num_workers=10
@@ -171,6 +181,7 @@ def main(list_configs, base_config, seed_splits):
             model_name=base_config["model"]["name"], 
             root=DATA_DIR,
             transform=base_config["data"]["transform"],
+            preprocess=base_config["model"]["preprocessor"],
             shuffle=False)
                 
     if base_config["data"]["class_subset"] is not None:
@@ -183,24 +194,25 @@ def main(list_configs, base_config, seed_splits):
     device = torch.device(f'cuda:{GPU_ID}' if torch.cuda.is_available() else 'cpu')
     from threadpoolctl import threadpool_info
     print(threadpool_info())
-    # model = get_model(model_name=base_config["model"]["name"], 
-    #                 dataset_name=base_config["data"]["name"],
-    #                 n_classes=base_config["data"]["n_classes"],
-    #                 input_dim=base_config["data"]["dim"],
-    #                 model_seed=base_config["model"]["model_seed"],
-    #                 checkpoint_dir = os.path.join(CHECKPOINTS_DIR_BASE, "ce"),
-    #                 desired_indices = base_config["data"]["class_subset"]
-    #                 )
+    model = get_model(model_name=base_config["model"]["name"], 
+                    dataset_name=base_config["data"]["name"],
+                    n_classes=base_config["data"]["n_classes"],
+                    input_dim=base_config["data"]["dim"],
+                    model_seed=base_config["model"]["model_seed"],
+                    checkpoint_dir = os.path.join(CHECKPOINTS_DIR_BASE, base_config["model"]["preprocessor"]),
+                    desired_indices = base_config["data"]["class_subset"]
+                    )
     
-    # model = model.to(device)
-    # model.eval()
-    
+    model = model.to(device)
+    model.eval()
+
+    for p in model.parameters():
+        p.requires_grad_(False)  # freeze permanently
+        
     # # for name, m in model.named_modules():
     # # #     print(name, m)
     # # exit()
-    # for p in model.parameters():
-    #     p.requires_grad_(False)  # freeze permanently
-    model = None
+    # model = None
     seed_split = base_config["data"]["seed_split"]
     print(f"Running seed split {seed_split}...")
 
@@ -215,17 +227,37 @@ def main(list_configs, base_config, seed_splits):
         config=base_config
         )
 
-    detectors = [get_detector(deepcopy(config), model, device, experiment_folder, CHECKPOINTS_DIR_BASE) for config in list_configs]
+    
+    if (base_config["method_name"] == "clustering") & (base_config["clustering"]["name"] in ["kmeans_torch", "soft-kmeans_torch"]):
+        HyperparameterSearch(
+            model=model, 
+            device=device, 
+            base_config=base_config, 
+            list_partition_hyperparams= {"temperatures": list_temperatures, "n_clusters": list_n_clusters},
+            train_loader=train_loader, 
+            # calib_loader=calib_loader,
+            val_loader=val_loader,
+            result_folder=results_folder,
+            mode = "evaluation",
+            metric ="fpr",
+            class_subset = base_config["data"]["class_subset"]
+            )
+        # Save the cluster centers of the best detector
+    # if True:
+    #     detectors = [get_detector(deepcopy(config), model, device, experiment_folder, CHECKPOINTS_DIR_BASE) for config in list_configs]
 
-    HyperparameterSearch(
-        detectors=detectors, 
-        model=model, 
-        device=device, 
-        base_config=base_config, 
-        list_configs=list_configs, 
-        train_loader=train_loader, 
-        val_loader=val_loader,
-        result_folder=results_folder)
+    #     HyperparameterSearch(
+    #         detectors=detectors, 
+    #         model=model, 
+    #         device=device, 
+    #         base_config=base_config, 
+    #         list_configs=list_configs, 
+    #         train_loader=train_loader, 
+    #         val_loader=val_loader,
+    #         result_folder=results_folder,
+    #         # mode = "evaluation",
+    #         # metric ="roc_auc"
+    #         )
             
 
 
@@ -244,17 +276,19 @@ if __name__ == "__main__":
             "n_splits": 3,
             "n_epochs" : 1,
             "r" : 2,
+            "ratio_calib": 0.5,
             # "n_samples_train" : 5000,
             # "n_samples_test" : 5000,
             "batch_size_train" : 512,
             "batch_size_test" : 512,
             # "seed_train" : 3,
             # "seed_test" : -5,
-            "class_subset" : None,              
+            "class_subset" : None  , #"cifar10" [5, 3, 8]              
             "transform": "test",},
         "model" : {
-            "name" : "timm_vit_tiny16", # mlp_synth_dim-10_classes-7, timm_vit_tiny16, timm_vit_base16, densenet121
+            "name" : "timm_vit_base16", # mlp_synth_dim-10_classes-7, timm_vit_tiny16, timm_vit_base16, densenet121
             "model_seed" : 1,
+            "preprocessor" : "ce"
                    },
         "method_name" : "clustering",
         "metric_learning" : {
@@ -263,27 +297,28 @@ if __name__ == "__main__":
             "magnitude" : 0., # 0.1
             }, 
         "gini" : {
-            "temperature" : 1,
+            "temperature" : 0.7,
             "normalize_gini" : True,
-            "magnitude" : 0.005, # 
+            "magnitude" : 0.002, # 
             },        
         "max_proba" : {
             "temperature" : 1,
             "magnitude" : 0.002, #
             },             
         "clustering" : {
-            "name" : "kmeans_torch", # "kmeans", "soft-kmeans", "bregman-hard", minikmeans
+            "name" : "soft-kmeans_torch", # "kmeans", "soft-kmeans", "bregman-hard", minikmeans
             "distance" : None, # "euclidean", "kl", "js", "alpha-divergence"
-            "n_clusters" : 100,
+            "n_clusters" : 90,
             "reorder_embs" : True, # True or False
+            "bound": "bernstein",
             "seed" : 1,
             "alpha" : 0.05,
-            "init_scheme" : 'random', # kmeans, k-means++
+            "init_scheme" : 'kmeans', # kmeans, k-means++, random
             "n_init" : 10, #5
             "space" : "probits", # "feature" or "classifier"
             "cov_type" : "diag",
-            "temperature" : 1,
-            "pred_weight" : 0., # None or float
+            "temperature" : 1.8,
+            "pred_weight" : None, # None or float
             "normalize_gini" : False,
             "batch_size": 2048,
             "reduction" : {
@@ -326,7 +361,21 @@ if __name__ == "__main__":
             }
     # for seed_split in [1, 2, 3, 4, 5, 7, 8, ]:
         # base_config["data"]["seed_split"] = seed_split
-    root = f"results/{base_config['data']['name']}_{base_config['model']['name']}_r-{base_config['data']['r']}_seed-split-{base_config['data']['seed_split']}"
+    # for dataset in ["cifar10", "cifar100"]:
+    #     for model_name in ["resnet34", "densenet121"]:  # , "timm_vit_tiny16", "timm_vit_base16"
+    #         for preprocessor in ["regmixup", "lognorm"]:
+    #             base_config["model"]["preprocessor"] = preprocessor
+    #             base_config["data"]["name"] = dataset
+    #             base_config["model"]["name"] = model_name
+    #             if dataset == "cifar10":
+    #                 base_config["data"]["n_classes"] = 10
+    #             else:
+    #                 base_config["data"]["n_classes"] = 100
+            
+    # for clustering_space in ["logits", "probits"]:
+    #     base_config["clustering"]["space"] = clustering_space
+        # root = f"{base_config['model']['preprocessor']}_results/{base_config['data']['name']}_{base_config['model']['name']}_r-{base_config['data']['r']}_seed-split-{base_config['data']['seed_split']}"
+    root = f"fair_{base_config['model']['preprocessor']}_results/{base_config['data']['name']}_{base_config['model']['name']}_r-{base_config['data']['ratio_calib']}_seed-split-{base_config['data']['seed_split']}"
     if base_config['method_name'] in ["clustering", "metric_learning", "random_forest"]:
         root += f"/transform-{base_config['data']['transform']}_n-epoch{base_config['data']['n_epochs']}_n-folds{base_config['data']['n_splits']}_{base_config['clustering']['space']}"
         if base_config['method_name'] == "clustering":
@@ -334,23 +383,33 @@ if __name__ == "__main__":
                 root += f"_distance-{base_config['clustering']['distance']}"
             if base_config['clustering']['name'] != "soft-kmeans":
                 root += f"_{base_config['clustering']['name']}"
+            root += f"_{base_config['clustering']['bound']}_n-init-{base_config['clustering']['n_init']}_{base_config['clustering']['init_scheme']}"
             # root += f"_probweights"
-            
+    elif base_config['method_name'] == "gini":
+        root += f"/transform-{base_config['data']['transform']}_normalize-{base_config['gini']['normalize_gini']}"
     else:
         root += f"/transform-{base_config['data']['transform']}"
     results_folder = root + f"_{base_config['method_name']}"
-
+    os.makedirs(results_folder, exist_ok=True)
+    print("Results folder:", results_folder)
     # results_folder = f"results/{base_config['data']['name']}_{base_config['model']['name']}_r-{base_config['data']['r']}_seed-split-{base_config['data']['seed_split']}_transform-{base_config['data']['transform']}_n-epoch{base_config['data']['n_epochs']}/{base_config['method_name']}" # "synth_results/resnet3072_test/all_results.csv"
-    experiment_folder = None
+    experiment_folder = results_folder
 
     # Don't put seed_splits in parameter_space !
 
     # Hyperparameter grid
-    n_neighbors = [10, 20, 30, 40, 50, 60, 80, 100]
-    # magnitudes = [0 + 0.001 * i for i in range(1, 30)] 
-    temperatures = [1. + 0.1 * i for i in range(10)]  # 1.0, 1.1, ..., 1.9
-    n_clusters = [250 + 20 * i for i in range(20)]  # 450, 470, ..., 650
-    weights = ["uniform", "distance"]
+    # n_neighbors = [10, 20, 30, 40, 50, 60, 80, 100]
+    # # magnitudes = [0 + 0.001 * i for i in range(1, 30)] 
+    # temperatures = [1. + 0.1 * i for i in range(10)]  # 1.0, 1.1, ..., 1.9
+    # n_clusters = [150 + 10 * i for i in range(30)]  # 150, 160, ..., 450
+    # weights = ["uniform", "distance"]
+    # list_temperatures = [0.1 + 0.1 * i for i in range(10)]  # 0.1, 0.2, ..., 1.0
+    # list_temperatures = [3 +0.5 * i for i in range(10)]  # 3.0, 3.5, ..., 7.0
+    # for exp in range (6):
+    list_temperatures = None # [0.98, 1.0, 1.02, 1.03, 1.04, 1.05]  # 1.0, 1.1, 1.2
+    list_n_clusters = None # [190 + 3 * i for i in range(20)] #[5 + 2 * i for i in range(20)]
+    # list_n_clusters = [10 + 2 * i for i in range(20)] 
+    # list_n_clusters = [100  + 50 * exp +  5 * i for i in range(10)]
 
     parameter_space = {
         # 'metric_learning.magnitude': [0. + 0.005 * i for i in range(10)],  # 0.1, 0.2, ..., 1.0
@@ -370,11 +429,11 @@ if __name__ == "__main__":
         # 'gini.magnitude': [0 + 0.0005 * i for i in range(20)],
         # 'gini.temperature': [0.5 + 0.1 * i for i in range(20)], # [0.5 + 0.1 * i for i in range(20)],
         # 'data.transform': ["test", "custom1"]
-        # 'gini.temperature': [0.7 + 0.1 * i for i in range(7)],  # 0.7, 0.8, ..., 1.3
-        # 'gini.magnitude': [0. + 0.002 * i for i in range(10)],  # 0.001, 0.002, ..., 0.02
-        'clustering.temperature': temperatures,
+        # 'max_proba.temperature': [0.7 + 0.1 * i for i in range(7)], #[0.7 + 0.1 * i for i in range(7)],  # 0.7, 0.8, ..., 1.3
+        # 'max_proba.magnitude': [0. + 0.002 * i for i in range(10)] #[0. + 0.002 * i for i in range(10)],  # 0.001, 0.002, ..., 0.02
+        # 'clustering.temperature': temperatures,
         # 'clustering.pred_weight': [0. + 0.0005 * i for i in range(3)],
-        'clustering.n_clusters': n_clusters, # n_clusters
+        # 'clustering.n_clusters': n_clusters, # n_clusters
         # "n_estimators": [200, 300, 400],
         # "max_depth": [None, 10, 20, 30],
         # "min_samples_split": [2, 5],
@@ -386,15 +445,9 @@ if __name__ == "__main__":
 }
 
     list_configs = make_config_list(base_config, parameter_space)  # test the function
-    # keys, values = zip(*parameter_space.items())
-    # grid = [dict(zip(keys, combo)) for combo in product(*values)]
-    # list_configs = []
-    # for params in grid:
-    #     config = deepcopy(base_config)
-    #     for path, val in params.items():
-    #         set_nested(config, path, val) 
-    #     list_configs.append(config)
 
+    list_conifgs = None
+    
     import time
     t0 = time.time()
     main(list_configs, base_config, base_config["data"]["seed_split"])

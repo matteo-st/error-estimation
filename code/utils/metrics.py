@@ -29,13 +29,52 @@ def auc_and_fpr_recall(conf, label, tpr_level: float = 0.95):
     return auroc, aupr_err, aupr_success, fpr, tpr, thr
 
 
-def compute_all_metrics(conf, detector_labels):
+# def compute_all_metrics(conf, detector_labels):
 
-    tpr_level = 0.95
-    auroc, aupr_in, aupr_out, fpr, tpr, thr = auc_and_fpr_recall(conf, detector_labels, tpr_level)
+#     tpr_level = 0.95
+#     auroc, aupr_in, aupr_out, fpr, tpr, thr = auc_and_fpr_recall(conf, detector_labels, tpr_level)
 
-    accuracy = np.mean(detector_labels)
-    aurc_value = aurc(detector_labels, conf)
+#     accuracy = np.mean(detector_labels)
+#     aurc_value = aurc(detector_labels, conf)
+
+#     return fpr, tpr, thr, auroc, accuracy, aurc_value, aupr_in, aupr_out
+
+def compute_all_metrics(conf, detector_labels, tpr_level: float = 0.95):
+    """
+    conf: np.ndarray of shape (N,) or (H, N)
+    detector_labels: np.ndarray of shape (N,)
+    returns 8-tuple; for batched conf, each item is (H,)
+    """
+    conf = np.asarray(conf)
+    y = np.asarray(detector_labels).astype(int)
+
+    # Scalar case: keep behavior identical
+    if conf.ndim == 1:
+        auroc, aupr_in, aupr_out, fpr, tpr, thr = auc_and_fpr_recall(conf, y, tpr_level)
+        accuracy = float(y.mean())
+        aurc_value = aurc(y, conf)
+        return fpr, tpr, thr, auroc, accuracy, aurc_value, aupr_in, aupr_out
+
+    # Batched case: loop over rows (H)
+    H, N = conf.shape
+    fpr = np.empty(H, dtype=float)
+    tpr = np.empty(H, dtype=float)
+    thr = np.empty(H, dtype=float)
+    auroc = np.empty(H, dtype=float)
+    accuracy = np.full(H, y.mean(), dtype=float)  # same for all rows
+    aurc_value = np.empty(H, dtype=float)
+    aupr_in = np.empty(H, dtype=float)
+    aupr_out = np.empty(H, dtype=float)
+
+    for h in range(H):
+        a, ain, aout, f, t, th = auc_and_fpr_recall(conf[h], y, tpr_level)
+        auroc[h] = a
+        aupr_in[h] = ain
+        aupr_out[h] = aout
+        fpr[h] = f
+        tpr[h] = t
+        thr[h] = th
+        aurc_value[h] = aurc(y, conf[h])
 
     return fpr, tpr, thr, auroc, accuracy, aurc_value, aupr_in, aupr_out
 
