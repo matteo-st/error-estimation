@@ -123,6 +123,9 @@ def TimmViTTiny16ImageNet(features_nodes=None):
     # get model specific transforms (normalization, resize)
     data_config = timm.data.resolve_model_data_config(model)
     transforms = timm.data.create_transform(**data_config, is_training=False)
+    print("data_config", data_config)
+    print("transforms", transforms)
+    # exit()
     input_dim = (3, 224, 224)
     if features_nodes is None:
         features_nodes = {"view": "pooler", "classifier": "classifier"}
@@ -258,8 +261,9 @@ def get_model(model_name: str,
               input_dim,
               model_seed, 
               checkpoint_dir,
-              desired_indices=None) -> torch.nn.Module:
-
+              desired_indices=[5, 3, 8]) -> torch.nn.Module:
+    print("desired_indices", desired_indices)
+  
     if model_name == "mlp_synth_dim-10_classes-7":
        
         checkpoint_dir = os.path.join(checkpoint_dir, model_name)
@@ -281,6 +285,7 @@ def get_model(model_name: str,
             )
         
         # Load the model weights
+        
         checkpoint_path = os.path.join(checkpoint_dir, "best_mlp.pth")
 
     elif (model_name == "resnet34") and (dataset_name == "gaussian_mixture"):
@@ -306,28 +311,50 @@ def get_model(model_name: str,
         model_essentials = get_model_essentials(model_name, dataset_name)
         model = model_essentials["model"]
         checkpoint_path = os.path.join(checkpoint_dir, "_".join([model_name, dataset_name]), str(model_seed), "best.pth")
-
-
+        try:
+            checkpoint_path = os.path.join(checkpoint_dir, "_".join([model_name, dataset_name]), str(model_seed), "best.pth")
+            checkpoint = torch.load(
+                checkpoint_path, map_location="cpu"
+            )
+        except:
+            checkpoint_path = os.path.join(checkpoint_dir, "_".join([model_name, dataset_name]), "last.pt")
+            checkpoint = torch.load(
+                checkpoint_path, map_location="cpu"
+            )
+           # w = torch.load(os.path.join(checkpoint_dir, args.model_name, "last.pt"), map_location="cpu")
+       
+        checkpoint = {k.replace("module.", ""): v for k, v in checkpoint.items()}
+        model.load_state_dict(checkpoint)
+        return model
     # Handle ViT variants
     elif model_name.startswith(("vit_", "timm_vit_")) and dataset_name == "imagenet":
         essentials = get_model_essentials(model_name, dataset_name)
         model = essentials["model"]
         return model
+    
+
 
         
     if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint file not found at {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     checkpoint = {k.replace("module.", ""): v for k, v in checkpoint.items()}
+  
     # print("checkpoint keys", checkpoint.keys())
     # print("model keys before loading", model.state_dict().keys())
+    if "openmix" in checkpoint_dir:
+        # add one class to model output
+        model._modules[list(model._modules.keys())[-1]] = torch.nn.Linear(
+            model._modules[list(model._modules.keys())[-1]].in_features,
+            model._modules[list(model._modules.keys())[-1]].out_features + 1,
+        )
     model.load_state_dict(checkpoint)
     # missing_keys, unexpected_keys = model.load_state_dict(checkpoint, strict=False)
     # print("Missing:", missing_keys)
     # print("Unexpected:", unexpected_keys)
 
-    if desired_indices is not None:
-        model = SubsetLogitWrapper(model, desired_indices)
+    # if desired_indices is not None:
+    model = SubsetLogitWrapper(model, desired_indices)
     
     return model
 
@@ -340,10 +367,14 @@ class SubsetLogitWrapper(torch.nn.Module):
         """
         super().__init__()
         self.model = base_model
+        print("desired_indices", desired_indices)
+    
         self.indices = torch.tensor(desired_indices, dtype=torch.long)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Get full logits from base model: shape [B, N]
         logits = self.model(x)
         # Select only desired class logits: shape [B, K]
+        logits = logits[:, self.indices]
+        print("logits shape after subset", logits.shape)
         return logits[:, self.indices]

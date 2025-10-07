@@ -727,6 +727,45 @@ def get_synthetic_dataset(
     return GaussianMixtureDataset(data_dir=data_dir, n_samples=n_samples)
 
 
+def _get_openmix_cifar10_transforms():
+    statistics = ((0.491, 0.482, 0.447), (0.247, 0.243, 0.262))
+    test_transforms = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.Resize((32, 32)),
+            transforms.Normalize(*statistics),
+        ]
+    )
+    train_transforms = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.Normalize(*statistics),
+        ]
+    )
+    return train_transforms, test_transforms
+
+
+def _get_openmix_cifar100_transforms():
+    statistics = ((0.507, 0.487, 0.441), (0.267, 0.256, 0.276))
+    test_transforms = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.Resize((32, 32)),
+            transforms.Normalize(*statistics),
+        ]
+    )
+    train_transforms = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.RandomCrop(32, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.Normalize(*statistics),
+        ]
+    )
+    return train_transforms, test_transforms
+
 
 
 def get_dataset(dataset_name: str, 
@@ -736,8 +775,9 @@ def get_dataset(dataset_name: str,
                  random_state: int = 0,
                  train=False,
                  transform="test",
+                 preprocess: bool = True,
                  **kwargs) -> Dataset:
-
+    
     if dataset_name not in datasets_registry.keys():
         raise ValueError(f"Dataset {dataset_name} not found")
 
@@ -746,7 +786,11 @@ def get_dataset(dataset_name: str,
             root, train=train, 
             download=True) 
     transform = get_model_essentials(model_name, dataset_name)[f"{transform}_transforms"]
-
+    if ("openmix" == preprocess) and ("cifar10" == dataset_name):
+            _, transform = _get_openmix_cifar10_transforms()
+    if ("openmix" == preprocess) and ("cifar100" == dataset_name):
+            _, transform = _get_openmix_cifar100_transforms()
+    # print("transform", transform)
     if not shuffle:
         return datasets_registry[dataset_name](
             root, train=train, 
