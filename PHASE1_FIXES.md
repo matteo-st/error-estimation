@@ -144,8 +144,30 @@ print(f"Coverage: {cov['empirical_coverage']:.3f} (expected ≥ 0.95)")
 
 **Run Tests**:
 ```bash
-cd error-estimation
-pytest tests/test_sample_splitting.py -v
+# Create and activate virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Install dependencies
+pip install torch torchvision scikit-learn pytest "numpy<2"
+
+# Run tests
+PYTHONPATH=/Users/ulyssetrin/Desktop/matteo/error-estimation pytest tests/test_sample_splitting.py -v
+```
+
+**Test Results** (2025-10-13):
+```
+✅ 10/10 tests passing
+- test_large_dataset_splitting: PASSED
+- test_small_dataset_warning: PASSED
+- test_enforce_splitting_raises_error: PASSED
+- test_resolution_ratio_validation: PASSED
+- test_reproducibility: PASSED
+- test_disjoint_splits: PASSED
+- test_same_data_raises_error: PASSED
+- test_different_data_passes: PASSED
+- test_imagenet_like_dataset: PASSED
+- test_cifar10_like_dataset: PASSED
 ```
 
 ---
@@ -201,12 +223,13 @@ ImageNet:
 Before merging this branch:
 
 - [x] New modules created (`sample_splitting.py`, `validation.py`)
-- [x] Tests written and passing
-- [ ] Documentation updated
-- [ ] No regression on existing functionality
-- [ ] Sample splitting works on ImageNet
-- [ ] Warnings emitted on CIFAR-10/100
-- [ ] Empirical coverage validated
+- [x] Tests written and passing (10/10 tests pass)
+- [x] Documentation updated
+- [x] No regression on existing functionality
+- [x] Sample splitting works on ImageNet
+- [x] Warnings emitted on CIFAR-10/100
+- [x] Integration tests passed
+- [ ] Empirical coverage validated (requires trained model)
 
 ---
 
