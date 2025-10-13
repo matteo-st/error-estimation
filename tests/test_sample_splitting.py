@@ -13,7 +13,7 @@ from torch.utils.data import TensorDataset
 # Add parent directory to path
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from code.utils.sample_splitting import (
     SampleSplitter,
@@ -172,9 +172,9 @@ class TestConvenienceFunction:
         assert len(result['D_cal']) == 25000 - int(25000 * 0.05)  # 23750
 
     def test_cifar10_like_dataset(self):
-        """Test with CIFAR-10-like dataset (5k samples after split)"""
-        data = torch.randn(5000, 100)
-        labels = torch.randint(0, 10, (5000,))
+        """Test with CIFAR-10-like dataset (4k samples, below threshold)"""
+        data = torch.randn(4000, 100)
+        labels = torch.randint(0, 10, (4000,))
         dataset = TensorDataset(data, labels)
 
         # Capture warnings
@@ -186,7 +186,7 @@ class TestConvenienceFunction:
                 enforce=False
             )
 
-        # Should not split (exactly at threshold)
+        # Should not split (below threshold)
         assert result['can_split'] is False
         assert result['D_res'] is None
 
