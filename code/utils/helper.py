@@ -8,6 +8,23 @@ import pandas as pd
 import re
 import glob
 
+import torch
+import random
+import numpy as np
+
+def setup_seeds(seed: int, seed_split: int):
+    """
+    Set random seeds for reproducibility.
+
+    Args:
+        seed (int): The seed to use.
+    """
+    random.seed(seed_split)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def read_table(

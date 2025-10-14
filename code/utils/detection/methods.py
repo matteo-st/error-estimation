@@ -1,4 +1,5 @@
 import torch
+import time
 import numpy as np
 from torch.distributions import MultivariateNormal
 from tqdm import tqdm
@@ -12,7 +13,8 @@ from torch.autograd import Variable
 from sklearn.decomposition import PCA
 from code.utils.helper import _prepare_config_for_results, append_results_to_file
 from code.utils.clustering.models import BregmanHard
-from code.utils.eval import  MultiDetectorEvaluator
+from code.utils.eval import  MultiDetectorEvaluator, AblationDetector
+from threadpoolctl import threadpool_limits
 from code.utils.clustering.divergences import (
     euclidean,
     kullback_leibler,
@@ -38,6 +40,674 @@ def gini(logits, temperature=1.0, normalize=False):
 
 
 
+class EvaluatorAblation:
+    def __init__(
+            self, 
+            model=None, 
+            cfg_detection=None,
+            cfg_dataset=None,
+            cal_loader=None,
+            res_loader=None,
+            test_loader=None,
+            device=None,
+            metric='fpr', 
+            result_folder="results/",
+            latent_paths="latent/train_latent.pt",
+            n_epochs={"res": 1, "cal": 1, "test": 1},
+            n_cal=1000,
+            var_ablation=None,
+            seed_split=0,
+            is_relu=False
+            ):
+
+        """
+        Args:
+            detectors (list): List of detector instances.
+        """
+        self.model = model
+        self.cfg_detection = cfg_detection
+        self.cfg_dataset = cfg_dataset
+        self.device = device
+        self.result_folder = result_folder
+        self.n_epochs = n_epochs
+        self.seed_split = seed_split
+        self.n_cal = n_cal
+        self.fixed_var_ablation = var_ablation
+        self.is_relu = is_relu
+
+        self.metric = metric
+        if metric in ["fpr", "aurc"]:
+            self.metric_direction = "min"
+        else:
+            self.metric_direction = "max"
+        self.cal_loader = cal_loader
+        self.res_loader = res_loader
+        self.val_loader = test_loader
+        self.latent_paths = latent_paths
+
+        self.evaluator_train = AblationDetector(
+            self.model, self.cal_loader, device=self.device, suffix="cal", latent_path=self.latent_paths["cal"],
+            cfg_dataset=self.cfg_dataset
+        )
+        self.evaluator_test = AblationDetector(
+            self.model, self.val_loader, device=self.device, suffix="test", latent_path=self.latent_paths["test"],
+            cfg_dataset=self.cfg_dataset
+        )
+
+        self.detector = None
+        self.values = {"res": None, "cal": None}
+        # self.run()
+
+   
+
+
+
+    def get_values(self, dataloader, name="cal"):
+
+        # all_model_preds = []
+        if dataloader is None:
+            return
+        latent_path = self.latent_paths[f"{name}"]
+
+        if os.path.exists(latent_path):
+            pkg = torch.load(latent_path, map_location="cpu")
+            all_logits = pkg["logits"].to(torch.float32)        # (N, C)
+            all_labels = pkg["labels"]              # (N,)
+            all_model_preds  = pkg["model_preds"]# (N,)
+            all_detector_labels = (all_model_preds != all_labels).float()
+            # print("logits [0]", all_logits[:1])
+            # print("labels [0]", all_labels[:1])
+
+        
+        else:
+                        
+            self.model.to(self.device)
+            self.model.eval()
+
+            all_model_preds = []
+            all_labels = []
+            all_logits = []
+     
+            # os.makedirs("debug_aug", exist_ok=True)
+            for epoch in range(self.n_epochs[f"{name}"]):
+                with torch.no_grad():
+                    for batch, (inputs, targets) in tqdm(enumerate(dataloader), total=len(dataloader), desc="Getting Training Logits", disable=False):
+                        # print("inputs [0]", inputs[0, :3, :3, :3])
+                        # print("targets [0]", targets[:3])
+                        # exit()
+                        inputs = inputs.to(self.device)
+                        # targets = targets.to(self.device)
+                    
+                        logits = self.model(inputs).cpu()  # logits: [batch_size, num_classes]
+                        model_preds = torch.argmax(logits, dim=1)
+
+                        # detector_labels = (model_preds != targets).float()
+                        # # all_model_preds.append(model_preds)
+                        # all_detector_labels.append(detector_labels)
+                        all_logits.append(logits)
+                        all_labels.append(targets.cpu())
+                        all_model_preds.append(model_preds)
+                 
+
+            
+            
+            # all_model_preds = torch.cat(all_model_preds, dim=0)
+            all_labels = torch.cat(all_labels, dim=0)
+            all_model_preds = torch.cat(all_model_preds, dim=0)
+            all_detector_labels = (all_model_preds != all_labels).float()
+            all_logits = torch.cat(all_logits, dim=0)
+      
+            # print("all logits 0:", all_logits[2, :10])
+            # print("all labels 0:", all_labels[:10])
+            # print("all model preds 0:", all_model_preds[:10])
+                    
+            # AFTER (robust)
+            parent = os.path.dirname(latent_path)
+            os.makedirs(parent, exist_ok=True)
+
+            tmp = latent_path + ".tmp"
+            torch.save(
+                {
+                    "logits": all_logits.cpu(),     # compact on disk
+                    "labels": all_labels.cpu().to(torch.int64),
+                    "model_preds": all_model_preds.cpu().to(torch.int64),
+                },
+                tmp,
+            )
+            os.replace(tmp, latent_path)  # atomic rename
+
+        self.values[f"{name}"] = {"logits": all_logits, "detector_labels": all_detector_labels}
+
+    def get_detector(self):
+
+        if not self.is_relu:
+            if self.cfg_detection["postprocessor_args"]["method"] not in ["soft-kmeans_torch"]:
+
+                self.detector = PartitionDetector(
+                    model=None, 
+                    n_clusters=self.cfg_detection["postprocessor_args"]["n_clusters"], 
+                    alpha=self.cfg_detection["postprocessor_args"]["alpha"], 
+                    name=self.cfg_detection["postprocessor_args"]["method"],
+                    n_classes=self.cfg_detection["postprocessor_args"]["n_classes"], 
+                    seed=self.cfg_detection["postprocessor_args"]["clustering_seed"], 
+                    init_scheme=self.cfg_detection["postprocessor_args"]["init_scheme"], # "random" or "k-means++", 
+                    n_init=self.cfg_detection["postprocessor_args"]["n_init"], # Number of initializations for k-means
+                    space=self.cfg_detection["postprocessor_args"]["space"], 
+                    temperature=self.cfg_detection["postprocessor_args"]["temperature"], 
+                    cov_type = self.cfg_detection["postprocessor_args"]["cov_type"],
+                    reorder_embs=self.cfg_detection["postprocessor_args"]["reorder_embs"], # Whether to reorder the embeddings based on the clustering
+                    experiment_folder=self.result_folder,
+                    bound=self.cfg_detection["postprocessor_args"]["bound"],
+                    pred_weight=self.cfg_detection["postprocessor_args"]["pred_weights"],
+                    batch_size=2048,
+                    device=self.device
+                    )
+            else:
+                self.detector = MegaPartitionDetector(
+                    model=None, 
+                    list_n_cluster=[self.cfg_detection["postprocessor_args"]["n_clusters"]],
+                    alpha=self.cfg_detection["postprocessor_args"]["alpha"], 
+                    name=self.cfg_detection["postprocessor_args"]["method"],
+                    n_classes=self.cfg_detection["postprocessor_args"]["n_classes"], 
+                    seed=self.cfg_detection["postprocessor_args"]["clustering_seed"], 
+                    init_scheme=self.cfg_detection["postprocessor_args"]["init_scheme"],
+                    n_init=self.cfg_detection["postprocessor_args"]["n_init"],
+                    space=self.cfg_detection["postprocessor_args"]["space"],
+                    temperature=self.cfg_detection["postprocessor_args"]["temperature"],                     # single temp here
+                    cov_type=self.cfg_detection["postprocessor_args"]["cov_type"],
+                    reorder_embs=self.cfg_detection["postprocessor_args"]["reorder_embs"],
+                    bound=self.cfg_detection["postprocessor_args"]["bound"],
+                    pred_weight=self.cfg_detection["postprocessor_args"].get("pred_weights", None),
+                    batch_size=2048,
+                    device=self.device,
+                    experiment_folder=self.result_folder,
+                )
+        else:
+            self.detector = MetricLearningLagrange(
+                model=None, 
+                lbd=self.cfg_detection["postprocessor_args"]["lambda"], 
+                temperature=self.cfg_detection["postprocessor_args"]["temperature"],
+                device=self.device
+                )
+
+
+    def save_results(self, result_file, results, mode="append"):
+        """
+        Save `results` (a pandas DataFrame) to CSV.
+
+        Parameters
+        ----------
+        result_file : str | Path
+            Target CSV path, e.g. ".../results.csv".
+        results : pd.DataFrame
+            Data to write.
+        mode : {"append", "increment", "overwrite"}, default "append"
+            - "append": append to `result_file` (create if missing). Writes header only if file doesn't exist.
+            - "increment": do not touch existing files; write to the next available incremented filename:
+                results.csv, results_1.csv, results_2.csv, ...
+            - "overwrite": write to `result_file`, replacing any existing file.
+
+        Returns
+        -------
+        Path
+            The path actually written to.
+        """
+        from pathlib import Path
+        import re
+        import pandas as pd
+
+        p = Path(result_file)
+        p.parent.mkdir(parents=True, exist_ok=True)
+
+        results["n_cal"] = self.n_cal
+        results["seed_split"] = self.seed_split
+
+        if mode not in {"append", "increment", "overwrite"}:
+            raise ValueError(f"mode must be 'append', 'increment', or 'overwrite'; got {mode}")
+
+        def _align_columns_for_append(target_path: Path, df_new: pd.DataFrame) -> pd.DataFrame:
+            """
+            If appending to an existing CSV with different columns, align to the union of columns.
+            Missing columns are filled with NaN. Column order: existing columns then new-only columns.
+            """
+            import os
+            if not target_path.exists():
+                return df_new
+            try:
+                # Read only header to get existing columns without loading whole file.
+                with target_path.open("r", encoding="utf-8") as f:
+                    header_line = f.readline().rstrip("\n")
+                existing_cols = header_line.split(",")
+                if len(existing_cols) == 1 and existing_cols[0] == "":  # empty header edge case
+                    return df_new
+            except Exception:
+                # If anything goes wrong, just return new df (pandas will error if incompatible)
+                return df_new
+
+            new_cols = list(df_new.columns)
+            union = existing_cols + [c for c in new_cols if c not in existing_cols]
+            # Reindex to the union, preserving order
+            return df_new.reindex(columns=union)
+
+        if mode == "increment":
+            suffix = p.suffix  # ".csv"
+            base_stem = re.sub(r"_(\d+)$", "", p.stem)
+            pat = re.compile(rf"^{re.escape(base_stem)}(?:_(\d+))?$")
+
+            max_i = -1
+            for q in p.parent.glob(f"{base_stem}*{suffix}"):
+                m = pat.fullmatch(q.stem)
+                if m:
+                    if m.group(1) is None:
+                        max_i = max(max_i, 0)
+                    else:
+                        max_i = max(max_i, int(m.group(1)))
+
+            target = p if max_i < 0 else p.with_name(f"{base_stem}_{max_i + 1}{suffix}")
+            results.to_csv(target, header=True, index=False)
+            print(f"[save_results] wrote (increment) -> {target}")
+            return target
+
+        if mode == "overwrite":
+            results.to_csv(p, header=True, index=False)
+            print(f"[save_results] wrote (overwrite) -> {p}")
+            return p
+
+        # mode == "append"
+        aligned = _align_columns_for_append(p, results)
+        write_header = not p.exists()
+        aligned.to_csv(p, mode="a", header=write_header, index=False)
+        print(f"[save_results] wrote (append, header={write_header}) -> {p}")
+        return p
+
+    
+
+    def fit_clustering(self):
+        if self.res_loader is None:
+            print("Fitting best detector on full training data")
+            t0 = time.time()
+            self.detector.fit(
+                logits=self.values["cal"]["logits"].to(self.detector.device),
+                detector_labels=self.values["cal"]["detector_labels"].to(self.detector.device),
+                dataloader=self.cal_loader,
+                fit_clustering=True
+            )
+            t1 = time.time()
+            print(f"Total time: {t1 - t0:.2f} seconds")
+        else:
+            print("Fitting resolution function on resolution data")
+            t0 = time.time()
+            self.detector.fit(
+                logits=self.values["res"]["logits"].to(self.detector.device),
+                detector_labels=self.values["res"]["detector_labels"].to(self.detector.device),
+                dataloader=self.res_loader,
+                fit_clustering=True
+            )
+            t1 = time.time()
+            print(f"Total time: {t1 - t0:.2f} seconds")
+            print("Fitting confidence intervals on calibration data")
+            t0 = time.time()
+            self.detector.fit(
+                logits=self.values["cal"]["logits"].to(self.detector.device),
+                detector_labels=self.values["cal"]["detector_labels"].to(self.detector.device),
+                dataloader=self.cal_loader,
+                fit_clustering=False
+            )
+            t1 = time.time()
+            print(f"Total time: {t1 - t0:.2f} seconds")
+
+    def run(self):
+        """
+        Fit all detectors on the training data.
+        
+        Args:
+            train_dataloader (DataLoader): DataLoader for the training data.
+        """
+
+        
+        print("Collecting values on res/cal data")
+        t0 = time.time()
+        self.get_values(self.res_loader, name="res")
+        self.get_values(self.cal_loader)
+        # self.get_values(self.calib_loader, calib=True)
+        t1 = time.time()
+        print(f"Total time: {t1 - t0:.2f} seconds")
+
+
+        self.get_detector()
+
+        if not self.is_relu:
+            self.fit_clustering()
+        else:
+            self.detector.fit(
+                logits=self.values["cal"]["logits"].to(self.detector.device),
+                detector_labels=self.values["cal"]["detector_labels"].to(self.detector.device),
+            )
+       
+
+
+        print("Evaluating best detector on training data")
+        self.cal_results = self.evaluator_train.evaluate([self.cfg_detection["postprocessor_args"]], [self.detector])[0]
+        print(f"Train result ({self.metric}): {self.cal_results[f'{self.metric}_cal'].values}")
+
+        print("Evaluating best detector on validation data")
+        t0 = time.time()
+        self.val_results = self.evaluator_test.evaluate([self.cfg_detection["postprocessor_args"]], [self.detector])[0]
+        t1 = time.time()
+        print(f"Val result ({self.metric}): {self.val_results[f'{self.metric}_test'].values}")
+        print(f"Total time: {t1 - t0:.2f} seconds")
+ 
+
+        if self.fixed_var_ablation is None:
+            file = "results.csv"
+        else:
+            file = f"results_{self.fixed_var_ablation}.csv"
+
+        self.save_results(
+            result_file=os.path.join(self.result_folder, file),
+            results=pd.merge(
+                self.cal_results, 
+                self.val_results,
+                how="outer")
+                    
+            )
+
+
+# class HyperparameterSearch:
+#     def __init__(
+#             self, 
+#             model=None, 
+#             cfg_detection=None,
+#             cfg_dataset=None,
+#             cal_loader=None,
+#             res_loader=None,
+#             test_loader=None,
+#             device=None,
+#             metric='fpr', 
+#             result_folder="results/",
+#             latent_paths="latent/train_latent.pt",
+#             n_epochs={"res": 1, "cal": 1, "test": 1},
+#             n_cal=1000,
+#             seed_split=0,
+#             ):
+
+#         """
+#         Args:
+#             detectors (list): List of detector instances.
+#         """
+#         self.model = model
+#         self.cfg_detection = cfg_detection["postprocessor_args"]
+#         self.cfg_dataset = cfg_dataset
+#         self.device = device
+#         self.result_folder = result_folder
+#         self.n_epochs = n_epochs
+#         self.seed_split = seed_split
+#         self.n_cal = n_cal
+
+#         self.metric = metric
+#         if metric in ["fpr", "aurc"]:
+#             self.metric_direction = "min"
+#         else:
+#             self.metric_direction = "max"
+#         self.cal_loader = cal_loader
+#         self.res_loader = res_loader
+#         self.val_loader = test_loader
+#         self.latent_paths = latent_paths
+
+#         self.evaluator_train = AblationDetector(
+#             self.model, self.cal_loader, device=self.device, suffix="cal", latent_path=self.latent_paths["cal"],
+#             cfg_dataset=self.cfg_dataset
+#         )
+#         self.evaluator_test = AblationDetector(
+#             self.model, self.val_loader, device=self.device, suffix="test", latent_path=self.latent_paths["test"],
+#             cfg_dataset=self.cfg_dataset
+#         )
+
+#         self.detector = None
+#         # self.run()
+
+   
+
+
+
+#     def get_values(self, train_dataloader, name="cal"):
+
+#         # all_model_preds = []
+#         latent_path = self.latent_paths[f"{name}"]
+
+#         if os.path.exists(latent_path):
+#             pkg = torch.load(latent_path, map_location="cpu")
+#             all_logits = pkg["logits"].to(torch.float32)        # (N, C)
+#             all_labels = pkg["labels"]              # (N,)
+#             all_model_preds  = pkg["model_preds"]# (N,)
+#             all_detector_labels = (all_model_preds != all_labels).float()
+        
+#         else:
+                        
+#             self.model.to(self.device)
+#             self.model.eval()
+
+#             all_model_preds = []
+#             all_labels = []
+#             all_logits = []
+#             # os.makedirs("debug_aug", exist_ok=True)
+#             for epoch in range(self.n_epochs[f"{name}"]):
+#                 with torch.no_grad():
+#                     for batch, (inputs, targets) in tqdm(enumerate(train_dataloader), total=len(train_dataloader), desc="Getting Training Logits", disable=False):
+
+#                         inputs = inputs.to(self.device)
+#                         # targets = targets.to(self.device)
+                    
+#                         logits = self.model(inputs).cpu()  # logits: [batch_size, num_classes]
+#                         model_preds = torch.argmax(logits, dim=1)
+
+#                         # detector_labels = (model_preds != targets).float()
+#                         # # all_model_preds.append(model_preds)
+#                         # all_detector_labels.append(detector_labels)
+#                         all_logits.append(logits)
+#                         all_labels.append(targets.cpu())
+#                         all_model_preds.append(model_preds)
+
+            
+            
+#             # all_model_preds = torch.cat(all_model_preds, dim=0)
+#             all_labels = torch.cat(all_labels, dim=0)
+#             all_model_preds = torch.cat(all_model_preds, dim=0)
+#             all_detector_labels = (all_model_preds != all_labels).float()
+#             all_logits = torch.cat(all_logits, dim=0)
+
+#             # AFTER (robust)
+#             parent = os.path.dirname(latent_path)
+#             os.makedirs(parent, exist_ok=True)
+
+#             tmp = latent_path + ".tmp"
+#             torch.save(
+#                 {
+#                     "logits": all_logits.cpu(),     # compact on disk
+#                     "labels": all_labels.cpu().to(torch.int64),
+#                     "model_preds": all_model_preds.cpu().to(torch.int64),
+#                 },
+#                 tmp,
+#             )
+#             os.replace(tmp, latent_path)  # atomic rename
+
+#         self.values = {
+#             f"{name}": {"logits": all_logits, "detector_labels": all_detector_labels}
+#         }
+
+
+            
+#     def get_detector(self):
+    
+#         self.detector = MegaPartitionDetector(
+#             model=None, 
+#             list_n_cluster=[self.cfg_detection["n_clusters"]],
+#             alpha=self.cfg_detection["alpha"], 
+#             name=self.cfg_detection["method"],
+#             n_classes=self.cfg_detection["n_classes"], 
+#             seed=self.cfg_detection["clustering_seed"], 
+#             init_scheme=self.cfg_detection["init_scheme"],
+#             n_init=self.cfg_detection["n_init"],
+#             space=self.cfg_detection["space"],
+#             temperature=self.cfg_detection["temperature"],                     # single temp here
+#             cov_type=self.cfg_detection["cov_type"],
+#             reorder_embs=self.cfg_detection["reorder_embs"],
+#             bound=self.cfg_detection["bound"],
+#             pred_weight=self.cfg_detection.get("pred_weight", None),
+#             batch_size=2048,
+#             device=self.device,
+#             experiment_folder=self.result_folder,
+#         )
+
+#     def save_results(self, result_file, results, mode="append"):
+#         """
+#         Save `results` (a pandas DataFrame) to CSV.
+
+#         Parameters
+#         ----------
+#         result_file : str | Path
+#             Target CSV path, e.g. ".../results.csv".
+#         results : pd.DataFrame
+#             Data to write.
+#         mode : {"append", "increment", "overwrite"}, default "append"
+#             - "append": append to `result_file` (create if missing). Writes header only if file doesn't exist.
+#             - "increment": do not touch existing files; write to the next available incremented filename:
+#                 results.csv, results_1.csv, results_2.csv, ...
+#             - "overwrite": write to `result_file`, replacing any existing file.
+
+#         Returns
+#         -------
+#         Path
+#             The path actually written to.
+#         """
+#         from pathlib import Path
+#         import re
+#         import pandas as pd
+
+#         p = Path(result_file)
+#         p.parent.mkdir(parents=True, exist_ok=True)
+
+#         results["n_cal"] = self.n_cal
+#         results["seed_split"] = self.seed_split
+
+#         if mode not in {"append", "increment", "overwrite"}:
+#             raise ValueError(f"mode must be 'append', 'increment', or 'overwrite'; got {mode}")
+
+#         def _align_columns_for_append(target_path: Path, df_new: pd.DataFrame) -> pd.DataFrame:
+#             """
+#             If appending to an existing CSV with different columns, align to the union of columns.
+#             Missing columns are filled with NaN. Column order: existing columns then new-only columns.
+#             """
+#             import os
+#             if not target_path.exists():
+#                 return df_new
+#             try:
+#                 # Read only header to get existing columns without loading whole file.
+#                 with target_path.open("r", encoding="utf-8") as f:
+#                     header_line = f.readline().rstrip("\n")
+#                 existing_cols = header_line.split(",")
+#                 if len(existing_cols) == 1 and existing_cols[0] == "":  # empty header edge case
+#                     return df_new
+#             except Exception:
+#                 # If anything goes wrong, just return new df (pandas will error if incompatible)
+#                 return df_new
+
+#             new_cols = list(df_new.columns)
+#             union = existing_cols + [c for c in new_cols if c not in existing_cols]
+#             # Reindex to the union, preserving order
+#             return df_new.reindex(columns=union)
+
+#         if mode == "increment":
+#             suffix = p.suffix  # ".csv"
+#             base_stem = re.sub(r"_(\d+)$", "", p.stem)
+#             pat = re.compile(rf"^{re.escape(base_stem)}(?:_(\d+))?$")
+
+#             max_i = -1
+#             for q in p.parent.glob(f"{base_stem}*{suffix}"):
+#                 m = pat.fullmatch(q.stem)
+#                 if m:
+#                     if m.group(1) is None:
+#                         max_i = max(max_i, 0)
+#                     else:
+#                         max_i = max(max_i, int(m.group(1)))
+
+#             target = p if max_i < 0 else p.with_name(f"{base_stem}_{max_i + 1}{suffix}")
+#             results.to_csv(target, header=True, index=False)
+#             print(f"[save_results] wrote (increment) -> {target}")
+#             return target
+
+#         if mode == "overwrite":
+#             results.to_csv(p, header=True, index=False)
+#             print(f"[save_results] wrote (overwrite) -> {p}")
+#             return p
+
+#         # mode == "append"
+#         aligned = _align_columns_for_append(p, results)
+#         write_header = not p.exists()
+#         aligned.to_csv(p, mode="a", header=write_header, index=False)
+#         print(f"[save_results] wrote (append, header={write_header}) -> {p}")
+#         return p
+
+
+    
+
+
+
+
+#     def run(self):
+#         """
+#         Fit all detectors on the training data.
+        
+#         Args:
+#             train_dataloader (DataLoader): DataLoader for the training data.
+#         """
+
+#         import time
+#         print("Collecting values on training data")
+#         t0 = time.time()
+#         self.get_values(self.cal1_loader)
+#         # self.get_values(self.calib_loader, calib=True)
+#         t1 = time.time()
+#         print(f"Total time: {t1 - t0:.2f} seconds")
+
+
+#         self.get_detector()
+
+#         print("Fitting best detector on full training data")
+#         t0 = time.time()
+        
+#         self.detector.fit(
+#             logits=self.values["cal"]["logits"].to(self.detector.device),
+#             detector_labels=self.values["cal"]["detector_labels"].to(self.detector.device),
+#             dataloader=self.cal_loader,
+#             fit_clustering=True
+#         )
+
+#         t1 = time.time()
+#         print(f"Total time: {t1 - t0:.2f} seconds")
+#         print("Evaluating best detector on training data")
+#         self.train_results = self.evaluator_train.evaluate([self.cfg_detection], [self.detector])[0]
+#         print(f"Train result ({self.metric}): {self.train_results[f'{self.metric}_cal'].values}")
+
+#         print("Evaluating best detector on validation data")
+#         t0 = time.time()
+#         self.val_results = self.evaluator_test.evaluate([self.cfg_detection], [self.detector])[0]
+#         t1 = time.time()
+#         print(f"Val result ({self.metric}): {self.val_results[f'{self.metric}_test'].values}")
+#         print(f"Total time: {t1 - t0:.2f} seconds")
+ 
+
+
+#         self.save_results(
+#             result_file=os.path.join(self.result_folder, f"results.csv"),
+#             results=pd.merge(
+#                 self.train_results, 
+#                 self.val_results,
+#                 how="outer")
+                    
+#             )
+
+
 
 class HyperparameterSearch:
     def __init__(
@@ -55,6 +725,8 @@ class HyperparameterSearch:
             result_folder="results/",
             mode = "search",
             class_subset = None,
+            hyperparam_file = None,
+            n_cal=500
             ):
 
         """
@@ -71,9 +743,12 @@ class HyperparameterSearch:
         self.result_folder = result_folder
         self.n_epochs = base_config["data"]["n_epochs"]
         self.list_partition_hyperparams = list_partition_hyperparams
-        #self.root = f"storage_latent/{base_config['data']['name']}_{base_config['model']['name']}_{base_config['model']['preprocessor']}_r-{base_config['data']['r']}_seed-split-{base_config['data']['seed_split']}/"
-        self.root = f"storage_latent/{base_config['data']['name']}_{base_config['model']['name']}_{base_config['model']['preprocessor']}_r-{base_config['data']['ratio_calib']}_seed-split-{base_config['data']['seed_split']}/"
+        self.root = f"storage_latent/{base_config['data']['name']}_{base_config['model']['name']}_{base_config['model']['preprocessor']}_r-{base_config['data']['r']}_seed-split-{base_config['data']['seed_split']}/"
+        #self.root = f"storage_latent/______{base_config['data']['name']}_{base_config['model']['name']}_{base_config['model']['preprocessor']}_r-{base_config['data']['ratio_calib']}_seed-split-{base_config['data']['seed_split']}/"
         self.class_subset = class_subset
+        self.hyperparam_file = hyperparam_file
+        self.n_cal = n_cal
+    
 
         if  (base_config['method_name'] == "clustering") & (base_config['clustering']['space'] == "classifier"):
             self.latent_path = self.root + f"{base_config['clustering']['space']}_train_n-epochs{self.n_epochs}_transform-{base_config['data']['transform']}.pt"
@@ -81,8 +756,12 @@ class HyperparameterSearch:
         else:
             self.latent_path = self.root + f"logits_train_n-epochs{self.n_epochs}_transform-{base_config['data']['transform']}.pt"
             self.latent_path_calib = self.root + f"{base_config['clustering']['space']}_calib_n-epochs{self.n_epochs}_transform-{base_config['data']['transform']}.pt"
-     
+            # self.latent_path_calib = self.latent_path
+        #self.latent_path_calib = f"latent/ablation/cifar10_resnet34_n_cal/seed-split-{base_config['data']['seed_split']}/cal_n-samples-{self.n_cal}_transform-test_n-epochs-1.pt"
+        print("Latent latent_path_calib:", self.latent_path_calib)
         self.mode = mode
+        if self.hyperparam_file is not None:
+            self.mode = "evaluation"
         self.metric = metric
         if metric in ["fpr", "aurc"]:
             self.metric_direction = "min"
@@ -93,7 +772,7 @@ class HyperparameterSearch:
         self.val_loader = val_loader
 
         self.evaluator_train = MultiDetectorEvaluator(
-            self.model, self.train_loader, device=self.device, suffix="train", base_config=self.base_config,
+            self.model, self.calib_loader, device=self.device, suffix="train", base_config=self.base_config,
           
             )
         self.evaluator_test = MultiDetectorEvaluator(
@@ -102,6 +781,7 @@ class HyperparameterSearch:
         self.evaluator_cross = MultiDetectorEvaluator(
             self.model, self.val_loader, device=self.device, suffix="cross", base_config=self.base_config,
         )
+        
         self.best_detector = None
         self.run()
 
@@ -124,44 +804,27 @@ class HyperparameterSearch:
             all_labels = pkg["labels"]              # (N,)
             all_model_preds  = pkg["model_preds"]# (N,)
             all_detector_labels = (all_model_preds != all_labels).float()
+    
+
         
         else:
                         
-            # def _invert_normalize(x, mean, std):
-            #     """Invert normalization on a BCHW tensor in-place-safe way."""
-            #     if mean is None or std is None:
-            #         return x
-            #     mean = torch.tensor(mean, device=x.device).view(1, -1, 1, 1)
-            #     std  = torch.tensor(std,  device=x.device).view(1, -1, 1, 1)
-            #     return x * std + mean
-
-            # def save_aug_grid(inputs, save_path, mean=None, std=None, nrow=8, clamp=True):
-            #     """
-            #     inputs: tensor [B,C,H,W] as it comes from the DataLoader (already augmented/normalized)
-            #     Saves a PNG grid after inverting Normalize.
-            #     """
-            #     from torchvision import transforms, utils as vutils
-            #     from PIL import Image
-            #     x = inputs.detach().cpu()
-            #     if mean is not None and std is not None:
-            #         x = _invert_normalize(x, mean, std).cpu()
-            #     if clamp:
-            #         x = torch.clamp(x, 0.0, 1.0)  # safe if transforms put values in [0,1] after inverse
-            #     grid = vutils.make_grid(x, nrow=nrow, padding=2)  # [3,H',W'] in [0,1]
-            #     nd = (grid.numpy().transpose(1, 2, 0) * 255.0).astype(np.uint8)
-            #     Image.fromarray(nd).save(save_path)
             self.model.to(self.device)
             self.model.eval()
 
             all_model_preds = []
             all_labels = []
             all_logits = []
+            all_inputs = []
             # os.makedirs("debug_aug", exist_ok=True)
             for epoch in range(self.n_epochs):
                 with torch.no_grad():
                     for batch, (inputs, targets) in tqdm(enumerate(train_dataloader), total=len(train_dataloader), desc="Getting Training Logits", disable=False):
-
+                            
                         inputs = inputs.to(self.device)
+                        # print("inputs [0]", inputs[0, :3, :3, :3])
+                        # print("targets [0]", targets[:3])
+                        # exit()
                         # targets = targets.to(self.device)
                     
                         logits = self.model(inputs).cpu()  # logits: [batch_size, num_classes]
@@ -173,6 +836,7 @@ class HyperparameterSearch:
                         all_logits.append(logits)
                         all_labels.append(targets.cpu())
                         all_model_preds.append(model_preds)
+                        all_inputs.append(inputs.cpu())
 
             
             
@@ -181,12 +845,22 @@ class HyperparameterSearch:
             all_model_preds = torch.cat(all_model_preds, dim=0)
             all_detector_labels = (all_model_preds != all_labels).float()
             all_logits = torch.cat(all_logits, dim=0)
+            all_inputs = torch.cat(all_inputs, dim=0)
 
             # AFTER (robust)
             parent = os.path.dirname(latent_path)
             os.makedirs(parent, exist_ok=True)
 
+
+
+            # print("logit", all_logits.mean(), all_logits.std())
+            # print("dtype:", all_logits.dtype)
+            # print("inputs means std:", all_inputs.mean(), all_inputs.std())
+            # print("inputs dtype:", all_inputs.dtype)
+            # torch.save(all_logits, "debug_aug/logits.pt")
+          
             tmp = latent_path + ".tmp"
+           
             torch.save(
                 {
                     "logits": all_logits.cpu(),     # compact on disk
@@ -196,10 +870,11 @@ class HyperparameterSearch:
                 tmp,
             )
             os.replace(tmp, latent_path)  # atomic rename
-        
+            
         if calib:
             self.values_calib = {"logits": all_logits, "detector_labels": all_detector_labels}
-        self.values = {"logits": all_logits, "detector_labels": all_detector_labels}
+        else:
+            self.values = {"logits": all_logits, "detector_labels": all_detector_labels}
 
 
     def prepare_configs_group(self):
@@ -357,12 +1032,13 @@ class HyperparameterSearch:
 
 
     def get_optimal_detector(self):
-        if False:
-            from code.utils.helper import read_table
-            cross_val_results = read_table(
-                expe_folder=self.result_folder,
-                hyperparam=True
-            )
+        if self.hyperparam_file is not None:
+            # from code.utils.helper import read_table
+            # cross_val_results = read_table(
+            #     expe_folder=self.result_folder,
+            #     hyperparam=True
+            # )
+            cross_val_results = pd.read_csv(os.path.join(self.result_folder, self.hyperparam_file))
             vals = cross_val_results[f"{self.metric}_val_cross"].values
             best_idx = int(np.argmax(vals) if self.metric_direction == "max" else np.argmin(vals))
             self.best_idx = best_idx
@@ -800,8 +1476,9 @@ class HyperparameterSearch:
         import time
         print("Collecting values on training data")
         t0 = time.time()
-        self.get_values(self.train_loader)
-        # self.get_values(self.calib_loader, calib=True)
+        if self.train_loader is not None:
+            self.get_values(self.train_loader)
+        self.get_values(self.calib_loader, calib=True)
         t1 = time.time()
         print(f"Total time: {t1 - t0:.2f} seconds")
 
@@ -848,24 +1525,24 @@ class HyperparameterSearch:
         if hasattr(self.best_detector, 'fit'):
             print("Fitting best detector on full training data")
             t0 = time.time()
+            # self.best_detector.fit(
+            #     logits=self.values_calib["logits"].to(self.best_detector.device), 
+            #     detector_labels=self.values_calib["detector_labels"].to(self.best_detector.device),
+            #     dataloader=self.train_loader,
+            #     fit_clustering=True 
+            #     )
             self.best_detector.fit(
                 logits=self.values["logits"].to(self.best_detector.device), 
                 detector_labels=self.values["detector_labels"].to(self.best_detector.device),
                 dataloader=self.train_loader,
                 fit_clustering=True 
                 )
-            # self.best_detector.fit(
-            #     logits=self.values["logits"].to(self.best_detector.device), 
-            #     detector_labels=self.values["detector_labels"].to(self.best_detector.device),
-            #     dataloader=self.train_loader,
-            #     fit_clustering=True 
-            #     )
-            # self.best_detector.fit(
-            #     logits=self.values_calib["logits"].to(self.best_detector.device), 
-            #     detector_labels=self.values_calib["detector_labels"].to(self.best_detector.device),
-            #     dataloader=self.calib_loader,
-            #     fit_clustering=False 
-            #     )
+            self.best_detector.fit(
+                logits=self.values_calib["logits"].to(self.best_detector.device), 
+                detector_labels=self.values_calib["detector_labels"].to(self.best_detector.device),
+                dataloader=self.calib_loader,
+                fit_clustering=False 
+                )
             t1 = time.time()
             print(f"Total time: {t1 - t0:.2f} seconds")
             print("Evaluating best detector on training data")
@@ -880,9 +1557,12 @@ class HyperparameterSearch:
         print(f"Total time: {t1 - t0:.2f} seconds")
         self.val_results["experiment_datetime"] = self.train_results["experiment_datetime"]
 
-
+        if self.hyperparam_file is not None:
+            result_file = self.hyperparam_file[:-3] + f"_opt_{self.metric}.csv"
+        else:
+            result_file = f"results_opt_{self.metric}.csv"
         self.save_results(
-            result_file=os.path.join(self.result_folder, f"results_opt_{self.metric}.csv"),
+            result_file=os.path.join(self.result_folder, result_file),
             results=pd.merge(
                 self.train_results, 
                 self.val_results,
@@ -1110,7 +1790,7 @@ def save_cluster_examples(
     rng = torch.Generator().manual_seed(0)
     for c in torch.unique(clusters).tolist():
         idx_c = (clusters == c).nonzero(as_tuple=True)[0]
-        print("idx_c", idx_c.shape)
+        # print("idx_c", idx_c.shape)
         if idx_c.numel() == 0:
             continue
 
@@ -1333,7 +2013,7 @@ class MegaPartitionDetector:
         if self.reorder_embs:
             embs, idx = embs.sort(dim=1, descending=True)  # idx: shape (B, N)
             self._perm_idx = idx
-            print("idx" ,idx.shape)                                   # save per-batch permutation
+            # print("idx" ,idx.shape)                                   # save per-batch permutation
        
             # embs: (N, D)
             # scores = embs.norm(dim=1)                 # example key, shape (N,)
@@ -1343,11 +2023,12 @@ class MegaPartitionDetector:
             # self._perm_idx = idx                        # save σ for later
 
         if self.pred_weight is not None:
-            preds = torch.argmax(logits, dim=1)
-            preds_onehot = torch.nn.functional.one_hot(preds, num_classes=self.n_classes).float()
-            scale = embs.detach().abs().amax()
-            W = float(self.pred_weight) * (float(scale) + 1e-8)
-            embs = torch.cat([embs, W * preds_onehot.to(embs.device)], dim=1)
+            if self.pred_weight > 0:
+                preds = torch.argmax(logits, dim=1)
+                preds_onehot = torch.nn.functional.one_hot(preds, num_classes=self.n_classes).float()
+                scale = embs.detach().abs().amax()
+                W = float(self.pred_weight) * (float(scale) + 1e-8)
+                embs = torch.cat([embs, W * preds_onehot.to(embs.device)], dim=1)
         return embs
     
  
@@ -1401,7 +2082,8 @@ class MegaPartitionDetector:
        
 
         all_embs = self._extract_embeddings(logits=logits)
-        print("all_embs shape", all_embs.shape)
+        # print("all_embs shape", all_embs.shape)
+        # print("embs[0]", all_embs[0])
 
         if fit_clustering:
             print("Fitting clustering algorithm")
@@ -1414,7 +2096,7 @@ class MegaPartitionDetector:
                 clusters = self.clustering_algo.fit_predict(all_embs, k=self.list_n_cluster)
                 clusters = clusters
                 # print("clusters fit shape", clusters.shape)
-        
+
             if self.method == "kmeans_torch":
                 self.inertia = self.clustering_algo._result.inertia
             else:
@@ -1427,11 +2109,13 @@ class MegaPartitionDetector:
         # print("inertia", self.inertia)
 
         # print("inertia", self.inertia)
+        # print("clustres shape", clusters.shape)
+        # print("cluster [:3]", clusters[:3])
         self.clustering(detector_labels, clusters, k=self.list_n_cluster)
        # statistics = ((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)) # cifar10 resnet34
         statistics = ((0.5000, 0.5000, 0.5000), (0.5000, 0.5000, 0.5000)) # imagenet base
         mean, std = statistics
-        out_dir = "./cluster_examples_imagenet_4"
+        out_dir = f"./cluster_examples_imagenet_7_fit_cluster_{fit_clustering}"
         # N = self._perm_idx.numel()
         # inv = torch.empty_like(self._perm_idx)
         # inv[self._perm_idx] = torch.arange(N, device=self._perm_idx.device)  # build σ^{-1}
@@ -1559,419 +2243,484 @@ class MegaPartitionDetector:
         return preds
 
 
-# @register_detector("clustering")
-# class PartitionDetector:
-#     def __init__(
-#             self, 
-#             model, 
-#             n_clusters=100, alpha=0.05, name="uniform",
-#             n_classes=7, seed=0, init_scheme="k-means++", # "random" or "k-means++", 
-#             n_init=1, # Number of initializations for k-means
-#             space="true_proba_error", 
-#             temperature=1.0, 
-#             cov_type = None,
-#             reduction_name=None, # For dimensionality reduction
-#             reduction_dim=2, reduction_n_neighbors=15, reduction_seed=0, # For UMAP
-#             normalize_gini=False, # Whether to normalize the Gini coefficient
-#             distance=None, # For BregmanHard clustering
-#             reorder_embs=False, # Whether to reorder the embeddings based on the clustering
-#             experiment_folder=None,
-#             bound="hoeffding",
-#             class_subset=None,
-#             params_path=None,
-#             pred_weight=None,
-#             batch_size=2048,
-#             device=torch.device('cpu')
-#             ):
-#         """
-#         Args:
-#             classifier (nn.Module): A PyTorch model that takes an input tensor of shape [1, dim] and returns (logits, probs).
-#             weights (torch.Tensor): Tensor of shape [n_classes] (e.g., [7]).
-#             means (torch.Tensor): Tensor of shape [n_classes, dim] (e.g., [7, 10]).
-#             stds (torch.Tensor): Tensor of shape [n_classes, dim] (e.g., [7, 10]).
-#             n_cluster (int): Number of clusters to partition the error probability into.
-#             alpha (float): Confidence level parameter for interval widths.
-#             method (str): The method to compute the cluster. (Currently only "uniform" is supported.)
-#             seed (int): Random seed for data generation.
-#             device (torch.device): Device on which to run the classifier.
-#         """
-#         self.n_cluster = n_clusters
-#         # self.model = model.to(device)
-#         self.model = model
-#         self.alpha = alpha
-#         # self.weights = weights      # torch.Tensor, shape: [n_classes]
-#         # self.means = means          # torch.Tensor, shape: [n_classes, dim]
-#         # self.stds = stds            # torch.Tensor, shape: [n_classes, dim]
-#         self.params_path = params_path
+@register_detector("clustering")
+class PartitionDetector:
+    def __init__(
+            self, 
+            model, 
+            n_clusters=100, alpha=0.05, name="uniform",
+            n_classes=7, seed=0, init_scheme="k-means++", # "random" or "k-means++", 
+            n_init=1, # Number of initializations for k-means
+            space="true_proba_error", 
+            temperature=1.0, 
+            cov_type = None,
+            reduction_name=None, # For dimensionality reduction
+            reduction_dim=2, reduction_n_neighbors=15, reduction_seed=0, # For UMAP
+            normalize_gini=False, # Whether to normalize the Gini coefficient
+            distance=None, # For BregmanHard clustering
+            reorder_embs=False, # Whether to reorder the embeddings based on the clustering
+            experiment_folder=None,
+            bound="hoeffding",
+            class_subset=None,
+            params_path=None,
+            pred_weight=None,
+            batch_size=2048,
+            device=torch.device('cpu')
+            ):
+        """
+        Args:
+            classifier (nn.Module): A PyTorch model that takes an input tensor of shape [1, dim] and returns (logits, probs).
+            weights (torch.Tensor): Tensor of shape [n_classes] (e.g., [7]).
+            means (torch.Tensor): Tensor of shape [n_classes, dim] (e.g., [7, 10]).
+            stds (torch.Tensor): Tensor of shape [n_classes, dim] (e.g., [7, 10]).
+            n_cluster (int): Number of clusters to partition the error probability into.
+            alpha (float): Confidence level parameter for interval widths.
+            method (str): The method to compute the cluster. (Currently only "uniform" is supported.)
+            seed (int): Random seed for data generation.
+            device (torch.device): Device on which to run the classifier.
+        """
+        self.n_cluster = n_clusters
+        # self.model = model.to(device)
+        self.model = model
+        self.alpha = alpha
+        # self.weights = weights      # torch.Tensor, shape: [n_classes]
+        # self.means = means          # torch.Tensor, shape: [n_classes, dim]
+        # self.stds = stds            # torch.Tensor, shape: [n_classes, dim]
+        self.params_path = params_path
 
-#         self.method = name
-#         self.device = device
-#         self.n_classes = n_classes
-#         self.reorder_embs = reorder_embs
-#         self.kmeans_seed = seed
-#         self.init_scheme = init_scheme
-#         self.n_init = n_init
-#         self.partionning_space = space
-#         self.cov_type = cov_type
-#         self.temperature = temperature
-#         self.divergence = distance
-#         self.batch_size = batch_size
-#         self.bound = bound
+        self.method = name
+        self.device = device
+        self.n_classes = n_classes
+        self.reorder_embs = reorder_embs
+        self.kmeans_seed = seed
+        self.init_scheme = init_scheme
+        self.n_init = n_init
+        self.partionning_space = space
+        self.cov_type = cov_type
+        self.temperature = temperature
+        self.divergence = distance
+        self.batch_size = batch_size
+        self.bound = bound
 
-#         self.normalize_gini = normalize_gini
+        self.normalize_gini = normalize_gini
 
-#         self.experiment_folder = experiment_folder
-#         if class_subset is not None:
-#             self.dict_class_subset = {i: orig for i, orig in enumerate(class_subset)}
-#         else:
-#             self.dict_class_subset = None
+        self.experiment_folder = experiment_folder
+        if class_subset is not None:
+            self.dict_class_subset = {i: orig for i, orig in enumerate(class_subset)}
+        else:
+            self.dict_class_subset = None
 
-#         self.reduction_name = reduction_name
-#         self.reducing_dim = reduction_dim
-#         self.n_neighbors = reduction_n_neighbors
-#         self.reducer_seed = reduction_seed
+        self.reduction_name = reduction_name
+        self.reducing_dim = reduction_dim
+        self.n_neighbors = reduction_n_neighbors
+        self.reducer_seed = reduction_seed
 
-#         self.pred_weight = pred_weight
+        self.pred_weight = pred_weight
 
-#         if self.reduction_name == "umap":
-#             self.reducer = umap.UMAP(n_components=self.reducing_dim,
-#                                         n_neighbors= self.n_neighbors, 
-#                                     #  random_state=self.reducer_seed
-#                                         )
-#         elif self.reduction_name == "pca":
-#             self.reducer = PCA(n_components=self.reducing_dim, random_state=self.reducer_seed)
-#         else:
-#             self.reducer = None
+        if self.reduction_name == "umap":
+            self.reducer = umap.UMAP(n_components=self.reducing_dim,
+                                        n_neighbors= self.n_neighbors, 
+                                    #  random_state=self.reducer_seed
+                                        )
+        elif self.reduction_name == "pca":
+            self.reducer = PCA(n_components=self.reducing_dim, random_state=self.reducer_seed)
+        else:
+            self.reducer = None
 
-#         # Initilize the density function
-#         if self.partionning_space == "true_proba_error":
+        # Initilize the density function
+        if self.partionning_space == "true_proba_error":
 
-#             if self.param_path is None:
-#                 raise ValueError("param_path must be provided when partionning_space is 'true_proba_error'")
+            if self.param_path is None:
+                raise ValueError("param_path must be provided when partionning_space is 'true_proba_error'")
    
-#             params = np.load(self.param_path)
-#             means   = params["means"]    # [n_classes, dim]
-#             covs    = params["covs"]     # [n_classes, dim, dim]
-#             weights = params["weights"]  # [n_classes]
+            params = np.load(self.param_path)
+            means   = params["means"]    # [n_classes, dim]
+            covs    = params["covs"]     # [n_classes, dim, dim]
+            weights = params["weights"]  # [n_classes]
 
-#             # --- Move to GPU & factorize covariances ---
+            # --- Move to GPU & factorize covariances ---
 
-#             means   = torch.from_numpy(means).float().to(device)      # [n_classes, dim]
-#             covs    = torch.from_numpy(covs).float().to(device)       # [n_classes, dim, dim]
-#             weights = torch.from_numpy(weights).float().to(device)    # [n_classes]
+            means   = torch.from_numpy(means).float().to(device)      # [n_classes, dim]
+            covs    = torch.from_numpy(covs).float().to(device)       # [n_classes, dim, dim]
+            weights = torch.from_numpy(weights).float().to(device)    # [n_classes]
 
-#             self.log_weights = torch.log(weights.to(device))      # torch.Tensor, shape: [n_classes]
-#             self.means = means.to(device)          # torch.Tensor, shape: [n_classes, dim]
-#             self.covs = covs.to(device)            # torch.Tensor, shape: [n_classes, dim]
+            self.log_weights = torch.log(weights.to(device))      # torch.Tensor, shape: [n_classes]
+            self.means = means.to(device)          # torch.Tensor, shape: [n_classes, dim]
+            self.covs = covs.to(device)            # torch.Tensor, shape: [n_classes, dim]
 
-#             # Initilize the density function
-#             self.pdfs = [MultivariateNormal(loc=self.means[i], covariance_matrix=self.covs[i]) for i in range(self.n_classes)]
-#         # if stds is not None:
-#         #     self.covs = torch.diag_embed(stds ** 2)
-#         #     self.pdfs = [MultivariateNormal(loc=self.means[i], covariance_matrix=self.covs[i]) for i in range(self.n_classes)]
+            # Initilize the density function
+            self.pdfs = [MultivariateNormal(loc=self.means[i], covariance_matrix=self.covs[i]) for i in range(self.n_classes)]
+        # if stds is not None:
+        #     self.covs = torch.diag_embed(stds ** 2)
+        #     self.pdfs = [MultivariateNormal(loc=self.means[i], covariance_matrix=self.covs[i]) for i in range(self.n_classes)]
 
-#         # Statistics to be computed in fit():
-#         self.cluster_counts = None
-#         self.cluster_error_means = None
-#         self.cluster_error_vars = None
-#         self.cluster_intervals = None
+        # Statistics to be computed in fit():
+        self.cluster_counts = None
+        self.cluster_error_means = None
+        self.cluster_error_vars = None
+        self.cluster_intervals = None
 
 
-#         # Initialize the clustering algorithm
-#         if self.method == "uniform":
-#             self.clustering_algo = None
-#         elif self.method == "kmeans":
-#             self.clustering_algo = KMeans(n_clusters=self.n_cluster, 
-#                                           random_state=self.kmeans_seed, 
-#                                             n_init=self.n_init,
-#                                           init=self.init_scheme, verbose=0)
-#         elif self.method == "soft-kmeans":
+        # Initialize the clustering algorithm
+        if self.method == "uniform":
+            self.clustering_algo = None
+        elif self.method == "kmeans":
+            self.clustering_algo = KMeans(n_clusters=self.n_cluster, 
+                                          random_state=self.kmeans_seed, 
+                                            n_init=self.n_init,
+                                          init=self.init_scheme, verbose=0)
+        elif self.method == "soft-kmeans":
+            # print("n_cluster", self.n_cluster)
+            # print("kmeans_seed", self.kmeans_seed)
+            # print("init_scheme", self.init_scheme)
+            # print("n_init", self.n_init)
+            # print("cov_type", self.cov_type)
+            self.clustering_algo = GaussianMixture(n_components=self.n_cluster, 
+                                                    random_state=self.kmeans_seed, 
+                                                    covariance_type=self.cov_type, 
+                                                    init_params=self.init_scheme,
+                                                    n_init=self.n_init,
+                                                      verbose=0, 
+
+                                                    # reg_covar=1e-3
+                                                    )
+        elif self.method == "kmeans_torch":
             
-#             self.clustering_algo = GaussianMixture(n_components=self.n_cluster, 
-#                                                     random_state=self.kmeans_seed, 
-#                                                     covariance_type=self.cov_type, 
-#                                                     init_params=self.init_scheme,
-#                                                     n_init=self.n_init, verbose=0, 
-#                                                     # reg_covar=1e-3
-#                                                     )
-#         elif self.method == "kmeans_torch":
+      
+            self.clustering_algo = TorchKMeans(
+                n_clusters=self.n_cluster, 
+                seed=self.kmeans_seed, 
+                init_method=self.init_scheme,
+                num_init=self.n_init, 
+                verbose=0, 
+                p_norm=2,
+                normalize=None,
+                # reg_covar=1e-3
+            )
+        elif self.method == "soft-kmeans_torch":
             
-#             self.clustering_algo = TorchKMeans(
-#                 n_clusters=self.n_cluster, 
-#                 seed=self.kmeans_seed, 
-#                 init_method=self.init_scheme,
-#                 num_init=self.n_init, 
-#                 verbose=0, 
-#                 p_norm=2,
-#                 normalize=None,
-#                 # reg_covar=1e-3
-#             )
-#         elif self.method == "soft-kmeans_torch":
-            
-#             self.clustering_algo = TorchSoftKMeans(
-#                 n_clusters=self.n_cluster, 
-#                 seed=self.kmeans_seed, 
-#                 init_method=self.init_scheme,
-#                 num_init=self.n_init, 
-#                 verbose=0, 
-#                 p_norm=2,
-#                 normalize=None,
-#                 # reg_covar=1e-3
-#             )
+            self.clustering_algo = TorchSoftKMeans(
+                n_clusters=self.n_cluster, 
+                seed=self.kmeans_seed, 
+                init_method=self.init_scheme,
+                num_init=self.n_init, 
+                verbose=0, 
+                p_norm=2,
+                normalize=None,
+                # reg_covar=1e-3
+            )
 
-#         elif self.method == "bregman-hard":
-#             divergences = {
-#                 "Euclidean": euclidean,
-#                 "KL": kullback_leibler,
-#                 "Itakura_Saito": itakura_saito,
-#                 "Alpha0.5": alpha_divergence_factory(0.5),
-#             }
+        elif self.method == "bregman-hard":
+            divergences = {
+                "Euclidean": euclidean,
+                "KL": kullback_leibler,
+                "Itakura_Saito": itakura_saito,
+                "Alpha0.5": alpha_divergence_factory(0.5),
+            }
 
-#             self.clustering_algo = BregmanHard(
-#                 n_clusters=self.n_cluster,
-#                 divergence=divergences[self.divergence],  # e.g., "kl", "euclidean", etc.
-#                 n_init=self.n_init,
-#                 initializer=self.init_scheme,
-#                 random_state= self.kmeans_seed,
-#                 )
-#         elif self.method == "minikmeans":
-#             self.clustering_algo = MiniBatchKMeans(n_clusters=self.n_cluster, 
-#                                           random_state=self.kmeans_seed, 
-#                                             n_init=self.n_init,
-#                                           init=self.init_scheme, 
-#                                         batch_size=self.batch_size,
-#                                           verbose=0)
-#         else:
-#             raise ValueError(f"Unsupported method: {self.method}")
+            self.clustering_algo = BregmanHard(
+                n_clusters=self.n_cluster,
+                divergence=divergences[self.divergence],  # e.g., "kl", "euclidean", etc.
+                n_init=self.n_init,
+                initializer=self.init_scheme,
+                random_state= self.kmeans_seed,
+                )
+        elif self.method == "minikmeans":
+            self.clustering_algo = MiniBatchKMeans(n_clusters=self.n_cluster, 
+                                          random_state=self.kmeans_seed, 
+                                            n_init=self.n_init,
+                                          init=self.init_scheme, 
+                                        batch_size=self.batch_size,
+                                          verbose=0)
+        else:
+            raise ValueError(f"Unsupported method: {self.method}")
         
-#     def _extract_embeddings(self, x=None, logits=None, temperature=None):
-#         """
-#         Extract embeddings from the model.
-#         This function is used to create a feature extractor.
-#         """
-#         temperature = self.temperature if temperature is None else temperature
+    def _extract_embeddings(self, x=None, logits=None, temperature=None):
+        """
+        Extract embeddings from the model.
+        This function is used to create a feature extractor.
+        """
+        temperature = self.temperature if temperature is None else temperature
 
-#         if logits is not None:
-#             if self.partionning_space == "gini":
-#                 embs = gini(logits, temperature=temperature, normalize=self.normalize_gini)
-#             elif self.partionning_space == "probits":
-#                 embs = torch.softmax(logits / temperature, dim=1)
-#             elif self.partionning_space == "logits":
-#                 embs = logits
-#         else:
-#             self.model.to(self.device)
-#             logits = self.model(x)
-#             self.model.to(torch.device('cpu'))
-#             if self.partionning_space == "gini":
-#                 embs = gini(logits, temperature=temperature, normalize=self.normalize_gini)
-#             elif self.partionning_space == "probits":
-#                 embs = torch.softmax(logits / temperature, dim=1)
-#             elif self.partionning_space == "logits":
-#                 embs = logits
-#             else:
-#                 raise ValueError("Unsupported partionning space")
+        if logits is not None:
+            if self.partionning_space == "gini":
+                embs = gini(logits, temperature=temperature, normalize=self.normalize_gini)
+            elif self.partionning_space == "probits":
+                embs = torch.softmax(logits / temperature, dim=1)
+            elif self.partionning_space == "logits":
+                embs = logits
+        else:
+            self.model.to(self.device)
+            logits = self.model(x)
+            self.model.to(torch.device('cpu'))
+            if self.partionning_space == "gini":
+                embs = gini(logits, temperature=temperature, normalize=self.normalize_gini)
+            elif self.partionning_space == "probits":
+                embs = torch.softmax(logits / temperature, dim=1)
+            elif self.partionning_space == "logits":
+                embs = logits
+            else:
+                raise ValueError("Unsupported partionning space")
 
 
-#         # Reorder embeddings if needed
-#         if self.reorder_embs:
-#             embs = embs.sort(dim=1, descending=True)[0]
-#         if self.pred_weight is not None:
-#             preds = torch.argmax(logits, dim=1)
-#             preds_onehot = torch.nn.functional.one_hot(preds, num_classes=self.n_classes).float()
-#             scale = embs.detach().abs().amax()
-#             W = float(self.pred_weight) * (float(scale) + 1e-8)
-#             embs = torch.cat([embs, W * preds_onehot.to(embs.device)], dim=1)
-#         return embs
+        # Reorder embeddings if needed
+        if self.reorder_embs:
+            embs = embs.sort(dim=1, descending=True)[0]
+        if self.pred_weight is not None:
+            if self.pred_weight > 0:
+                preds = torch.argmax(logits, dim=1)
+                preds_onehot = torch.nn.functional.one_hot(preds, num_classes=self.n_classes).float()
+                scale = embs.detach().abs().amax()
+                W = float(self.pred_weight) * (float(scale) + 1e-8)
+                embs = torch.cat([embs, W * preds_onehot.to(embs.device)], dim=1)
+        return embs
     
-#     def func_proba_error(self, x):
-#         """
-#         Compute an error probability for a given input x.
-#         A simple proxy is: error probability = 1 - max(predicted probability)
+    def func_proba_error(self, x):
+        """
+        Compute an error probability for a given input x.
+        A simple proxy is: error probability = 1 - max(predicted probability)
         
-#         Args:
-#             x (np.ndarray): A 1D NumPy array of shape [dim].
-#             classifier (nn.Module): The classifier.
-#             device (torch.device): Device to use.
+        Args:
+            x (np.ndarray): A 1D NumPy array of shape [dim].
+            classifier (nn.Module): The classifier.
+            device (torch.device): Device to use.
             
-#         Returns:
-#             proba_error (float): The error probability.
-#         """
-#         x = x.to(self.device)
-#         batch_size = x.shape[0]  # batch_size 
-#         with torch.no_grad():
-#             logits = self.model(x)
-#             model_pred = torch.argmax(logits, dim=1, keepdim=True)
+        Returns:
+            proba_error (float): The error probability.
+        """
+        x = x.to(self.device)
+        batch_size = x.shape[0]  # batch_size 
+        with torch.no_grad():
+            logits = self.model(x)
+            model_pred = torch.argmax(logits, dim=1, keepdim=True)
 
-#                 # 2) compute unnormalized log-posteriors: log w_i + log p_i(x)
-#         x = x.view(batch_size, -1) 
-#         log_data_probs = torch.stack([
-#             self.pdfs[i].log_prob(x) + self.log_weights[i]
-#             for i in range(len(self.pdfs))
-#         ], dim=1) 
+                # 2) compute unnormalized log-posteriors: log w_i + log p_i(x)
+        x = x.view(batch_size, -1) 
+        log_data_probs = torch.stack([
+            self.pdfs[i].log_prob(x) + self.log_weights[i]
+            for i in range(len(self.pdfs))
+        ], dim=1) 
 
-#         #  3) log-denominator = logsumexp over classes
-#         log_den = torch.logsumexp(log_data_probs, dim=1, keepdim=True)  # [1,1]
+        #  3) log-denominator = logsumexp over classes
+        log_den = torch.logsumexp(log_data_probs, dim=1, keepdim=True)  # [1,1]
 
-#         #  4) log-posterior per class
-#         log_post = log_data_probs - log_den 
-#         # 5) Bayes error probability = 1 − posterior_of_predicted
-#         log_post_pred = log_post.gather(1, model_pred)            # [1,1]
-#         error_proba    = 1.0 - torch.exp(log_post_pred)      # [1,1]
+        #  4) log-posterior per class
+        log_post = log_data_probs - log_den 
+        # 5) Bayes error probability = 1 − posterior_of_predicted
+        log_post_pred = log_post.gather(1, model_pred)            # [1,1]
+        error_proba    = 1.0 - torch.exp(log_post_pred)      # [1,1]
 
-#         # Normalize the probabilities
-#         return error_proba
+        # Normalize the probabilities
+        return error_proba
 
 
-#     def predict_clusters(self, x=None, logits=None):
+    def predict_clusters(self, x=None, logits=None):
 
-#         embs = self._extract_embeddings(x, logits)
+        embs = self._extract_embeddings(x, logits)
 
-#         if self.method == "uniform":
-#             cluster = torch.floor(embs * self.n_cluster).long()
-#             cluster[cluster == self.n_cluster] = self.n_cluster - 1 # Handle edge case when proba_error == 1
-#             return cluster
+        if self.method == "uniform":
+            cluster = torch.floor(embs * self.n_cluster).long()
+            cluster[cluster == self.n_cluster] = self.n_cluster - 1 # Handle edge case when proba_error == 1
+            return cluster
         
-#         else:
-#             if self.reducer is not None:
-#                 embs = self.reducer.transform(embs.cpu().numpy())
-#                 cluster = torch.tensor(self.clustering_algo.predict(embs), 
-#                                     device=self.device)
-#             else:
-#                 if self.method in ["kmeans_torch", "soft-kmeans_torch"]:
-#                     embs = embs.to(self.device).float().unsqueeze(0)
-#                     cluster = self.clustering_algo.predict(embs).squeeze(0).cpu()
-#                     # print("cluster predict shape", cluster.shape)
-#                 else:
-#                     cluster = torch.tensor(self.clustering_algo.predict(embs.cpu().numpy()), 
-#                                    device=self.device)
-#             return cluster
-#         # else:
-#         #     raise ValueError("Unsupported method")
+        else:
+            if self.reducer is not None:
+                embs = self.reducer.transform(embs.cpu().numpy())
+                cluster = torch.tensor(self.clustering_algo.predict(embs), 
+                                    device=self.device)
+            else:
+                if self.method in ["kmeans_torch", "soft-kmeans_torch"]:
+                    embs = embs.to(self.device).float().unsqueeze(0)
+                    cluster = self.clustering_algo.predict(embs).squeeze(0).cpu()
+                    # print("cluster predict shape", cluster.shape)
+                else:
+                    cluster = torch.tensor(self.clustering_algo.predict(embs.cpu().numpy()), 
+                                   device=self.device)
+            return cluster
+        # else:
+        #     raise ValueError("Unsupported method")
 
-#     def save_results(self, experiment_folder):
+    def save_results(self, experiment_folder):
 
-#             np.savez_compressed(
-#                 os.path.join(experiment_folder, "cluster_results.npz"),
-#                     cluster_counts=self.cluster_counts,
-#                     cluster_error_means=self.cluster_error_means,
-#                     cluster_error_vars=self.cluster_error_vars,
-#                     cluster_intervals=self.cluster_intervals
-#                 )
+            np.savez_compressed(
+                os.path.join(experiment_folder, "cluster_results.npz"),
+                    cluster_counts=self.cluster_counts,
+                    cluster_error_means=self.cluster_error_means,
+                    cluster_error_vars=self.cluster_error_vars,
+                    cluster_intervals=self.cluster_intervals
+                )
             
-#             joblib.dump(self.clustering_algo, os.path.join(experiment_folder, 'clustering_algo.pkl'))
+            joblib.dump(self.clustering_algo, os.path.join(experiment_folder, 'clustering_algo.pkl'))
 
+    # def _deterministic_gmm(self, X_np):
+    #     """
+    #     Build a GaussianMixture instance with *explicit* initialization
+    #     (no internal k-means), so results are deterministic given X_np.
+    #     """
+    #     # 1) Deterministic KMeans++ centers (single-thread)
+    #     with threadpool_limits(limits=1):
+    #         km = KMeans(
+    #             n_clusters=self.n_cluster,
+    #             init="k-means++",
+    #             n_init=1,
+    #             algorithm="lloyd",
+    #             max_iter=300,
+    #             tol=1e-4,
+    #             random_state=self.kmeans_seed,
+    #         )
+    #         km.fit(X_np)
+    #         means_init = km.cluster_centers_.copy()
 
-#     def fit(self, logits, detector_labels):
+    #     # 2) Stable diagonal covariances + uniform weights
+    #     #    (small jitter avoids degeneracy and is deterministic)
+    #     var = np.var(X_np, axis=0, ddof=1) + 1e-9
+    #     covs_init = np.tile(np.diag(var), (self.n_cluster, 1, 1))
+    #     weights_init = np.full(self.n_cluster, 1.0 / self.n_cluster, dtype=X_np.dtype)
+
+    #     # 3) Build GMM with provided init; *no* internal k-means
+    #     gmm = GaussianMixture(
+    #         n_components=self.n_cluster,
+    #         covariance_type="diag" if self.cov_type is None else self.cov_type,
+    #         n_init=1,
+    #         # init_params="",              # <- critical: skip internal init
+    #         random_state=self.kmeans_seed,
+    #         reg_covar=1e-6,              # stability, deterministic
+    #         verbose=0,
+    #         means_init=means_init,
+    #         weights_init=weights_init,
+    #         precisions_init= 1.0 / np.clip(np.diagonal(covs_init, axis1=1, axis2=2), 1e-12, None)  # shape (n_clusters, dim)
+    #     )
+    #     # gmm.means_init = means_init
+    #     # gmm.weights_init = weights_init
+    #     # if gmm.covariance_type == "diag":
+    #     #     gmm.precisions_init = 1.0 / np.clip(np.diag(covs_init[0]), 1e-12, None)
+    #     # else:
+    #     #     gmm.covariances_init = covs_init
+
+    #     return gmm
+
+    def fit(self, logits, detector_labels, **kwargs):
    
 
-#         # print("logits shape", logits.shape)
-#         all_embs = self._extract_embeddings(logits=logits) 
-
-#         if self.reducer is not None:
-#             # If a reducer is used, fit it on the embeddings
+        # print("logits shape", logits.shape)
+        all_embs = self._extract_embeddings(logits=logits) 
+        # print("embs [0]", all_embs[:2])
+        # print("dtype", all_embs.dtype)
+        # print("c contiguous torch", all_embs.is_contiguous())
+        # torch.save(all_embs, "test_my_embs.pt")
+        # if self.reducer is not None:
+        #     # If a reducer is used, fit it on the embeddings
            
-#             all_embs = torch.tensor(self.reducer.fit_transform(all_embs.cpu().numpy()), device=self.device)
-#         # self.all_embs = all_embs.cpu().numpy().squeeze(-1)
+        #     all_embs = torch.tensor(self.reducer.fit_transform(all_embs.cpu().numpy()), device=self.device)
+        # self.all_embs = all_embs.cpu().numpy().squeeze(-1)
 
-#         # print("dtype", all_embs.cpu().numpy().dtype)
-#         # print("c contiguous", all_embs.cpu().numpy().flags.c_contiguous)
-#         if self.method in ["kmeans_torch", "soft-kmeans_torch"]:
-#             all_embs = all_embs.to(self.device)
-#             clusters = self.clustering_algo.fit_predict(
-#                 all_embs.unsqueeze(0))
-#             clusters = clusters.squeeze(0).cpu()
-#             # print("clusters fit shape", clusters.shape)
-#         else:
-#             all_embs = all_embs.cpu().numpy()
-#             clusters = self.clustering_algo.fit_predict(all_embs)
-#             clusters = torch.tensor(clusters)
-#         # print("clusters fit shape", clusters.shape)
-
-
-#         if self.method == "kmeans":
-#             self.inertia = self.clustering_algo.inertia_
-#             self.n_iter = self.clustering_algo.n_iter_
-#         elif self.method == "soft-kmeans":
-#             self.inertia = self.clustering_algo.lower_bound_
-#         elif self.method == "kmeans_torch":
-#             self.inertia = self.clustering_algo._result.inertia
-#             self.n_iter = self.clustering_algo.n_iter
-#         # print("n_iter", self.n_iter)
-#         # print("inertia", self.inertia)
-
-#         # print("inertia", self.inertia)
-#         self.clustering(detector_labels, clusters)
-        
-
-#         if self.experiment_folder is not None:
-#             self.save_results(self.experiment_folder)
-
-
-#     def clustering(self, detector_labels, clusters):
-#         """
-#         detector_labels: (n_samples,)
-#         clusters:(num_comb, n_samples)
-#         """
-#         # Initialize lists to store per-cluster statistics.
-    
-#         self.cluster_counts = []
-#         self.cluster_error_means = []
-#         self.cluster_error_vars = []
-#         self.cluster_intervals = []
-        
-#         # For each cluster, compute the sample mean and variance of the error indicator.
-#         for i in range(self.n_cluster):
-#             idx = (clusters == i).nonzero(as_tuple=True)[0]
-#             count = idx.numel()
-#             self.cluster_counts.append(count)
-
-#             if count > 0:
-#                 cluster_detector_labels = detector_labels[idx]
-
-#                 error_mean = cluster_detector_labels.mean().item()
-#                 error_vars = cluster_detector_labels.var(unbiased=False).item()
-
-#                 self.cluster_error_means.append(error_mean)
-#                 self.cluster_error_vars.append(error_vars)
-
-#                 # Confidence interval half-width using a Hoeffding-type bound.
-#                 if self.bound == "bernstein":
-#                     cst = torch.log(torch.tensor(3 / self.alpha, device=self.device))
-#                     half_width = torch.sqrt(2 * cst * error_vars / count) +  3 * cst / count
-#                 else:
-#                     half_width = torch.sqrt(torch.log(torch.tensor(2 / self.alpha, device=self.device)) / (2 * count))
-#                 lower_bound = max(0.0, error_mean - half_width.item())
-#                 upper_bound = min(1.0, error_mean + half_width.item())
-#                 self.cluster_intervals.append((lower_bound, upper_bound))
-    
-#             else:
-#                 self.cluster_error_means.append(0.0)
-#                 self.cluster_error_vars.append(0.0)
-#                 self.cluster_intervals.append((0, 1))
-
-
-
-#     def __call__(self, x=None, logits=None, save_embs=True):
-#         """
-#         Given an input x (as a NumPy array of shape [dim]), 
-#         returns the upper bound of the estimated error interval for the cluster into which x falls.
-        
-#         Args:
-#             x (np.ndarray): Input sample, shape [dim].
+        # print("dtype", all_embs.cpu().numpy().dtype)
+        # print("c contiguous", all_embs.cpu().numpy().flags.c_contiguous)
+        if self.method in ["kmeans_torch", "soft-kmeans_torch"]:
+            all_embs = all_embs.to(self.device)
+            clusters = self.clustering_algo.fit_predict(
+                all_embs.unsqueeze(0))
+            clusters = clusters.squeeze(0).cpu()
+            # print("clusters fit shape", clusters.shape)
+        else:
             
-#         Returns:
-#             upper_bound (float): The upper bound of the error confidence interval.
-#         """
-#         cluster = self.predict_clusters(x, logits)
-#         all_upper_bounds = torch.tensor([ub for (_, ub) in self.cluster_intervals],
-#                                          dtype=torch.float32,
-#                                          device=self.device)
-#         detector_preds = all_upper_bounds[cluster]
-#         # if save_embs:
-#         #     # Save the embeddings for further analysis
-#         #     self.embs = self.feature_extractor(x)
-#         #     self.clusters = cluster
-#         return detector_preds
+            print("using soft kmeans")
+            all_embs = all_embs.cpu().numpy()
+            
+            # X = all_embs.cpu().numpy().astype(np.float, copy=False)
+            # X = np.ascontiguousarray(X)
+            # self.clustering_algo = self._deterministic_gmm(X)
+            with threadpool_limits(limits=1):          # <- critical
+    
+                clusters = self.clustering_algo.fit_predict(all_embs)
+            clusters = torch.tensor(clusters)
+        # print("clusters fit shape", clusters.shape)
+        # print("value counts", torch.bincount(clusters).sort(descending=True)[0][:10])
+        # print("clusters", clusters[:10])
+        if self.method == "kmeans":
+            self.inertia = self.clustering_algo.inertia_
+            self.n_iter = self.clustering_algo.n_iter_
+        elif self.method == "soft-kmeans":
+            self.inertia = self.clustering_algo.lower_bound_
+        elif self.method == "kmeans_torch":
+            self.inertia = self.clustering_algo._result.inertia
+            self.n_iter = self.clustering_algo.n_iter
+        # print("n_iter", self.n_iter)
+        # print("inertia", self.inertia)
+
+        # print("inertia", self.inertia)
+        self.clustering(detector_labels, clusters)
+        
+
+        # if self.experiment_folder is not None:
+        #     self.save_results(self.experiment_folder)
+
+
+    def clustering(self, detector_labels, clusters):
+        """
+        detector_labels: (n_samples,)
+        clusters:(num_comb, n_samples)
+        """
+        # Initialize lists to store per-cluster statistics.
+    
+        self.cluster_counts = []
+        self.cluster_error_means = []
+        self.cluster_error_vars = []
+        self.cluster_intervals = []
+        
+        # For each cluster, compute the sample mean and variance of the error indicator.
+        for i in range(self.n_cluster):
+            idx = (clusters == i).nonzero(as_tuple=True)[0]
+            count = idx.numel()
+            self.cluster_counts.append(count)
+
+            if count > 0:
+                cluster_detector_labels = detector_labels[idx]
+
+                error_mean = cluster_detector_labels.mean().item()
+                error_vars = cluster_detector_labels.var(unbiased=False).item()
+
+                self.cluster_error_means.append(error_mean)
+                self.cluster_error_vars.append(error_vars)
+
+                # Confidence interval half-width using a Hoeffding-type bound.
+                if self.bound == "bernstein":
+                    cst = torch.log(torch.tensor(3 / self.alpha, device=self.device))
+                    half_width = torch.sqrt(2 * cst * error_vars / count) +  3 * cst / count
+                else:
+                    half_width = torch.sqrt(torch.log(torch.tensor(2 / self.alpha, device=self.device)) / (2 * count))
+                lower_bound = max(0.0, error_mean - half_width.item())
+                upper_bound = min(1.0, error_mean + half_width.item())
+                self.cluster_intervals.append((lower_bound, upper_bound))
+    
+            else:
+                self.cluster_error_means.append(0.0)
+                self.cluster_error_vars.append(0.0)
+                self.cluster_intervals.append((0, 1))
+
+
+
+    def __call__(self, x=None, logits=None, save_embs=True):
+        """
+        Given an input x (as a NumPy array of shape [dim]), 
+        returns the upper bound of the estimated error interval for the cluster into which x falls.
+        
+        Args:
+            x (np.ndarray): Input sample, shape [dim].
+            
+        Returns:
+            upper_bound (float): The upper bound of the error confidence interval.
+        """
+        cluster = self.predict_clusters(x, logits)
+        all_upper_bounds = torch.tensor([ub for (_, ub) in self.cluster_intervals],
+                                         dtype=torch.float32,
+                                         device=self.device)
+        detector_preds = all_upper_bounds[cluster]
+        # if save_embs:
+        #     # Save the embeddings for further analysis
+        #     self.embs = self.feature_extractor(x)
+        #     self.clusters = cluster
+        return detector_preds
 
 
 from sklearn.neighbors import KNeighborsClassifier
@@ -2955,9 +3704,10 @@ class RandomForestDetector(BasePostHocDetector):
 
 @register_detector("metric_learning")
 class MetricLearningLagrange:
-    def __init__(self, model, lbd=0.5, temperature=1, **kwargs):
+    def __init__(self, model, lbd=0.5, temperature=1, device=None, **kwargs):
         self.model = model
-        self.device = next(model.parameters()).device
+        # self.device = next(model.parameters()).device
+        self.device = device 
         self.lbd = lbd
         self.temperature = temperature
         self.params = None
@@ -2998,8 +3748,11 @@ class MetricLearningLagrange:
             train_probs_pos = train_probs[train_labels == 0]
             train_probs_neg = train_probs[train_labels == 1]
            
-            mean_pos = (train_probs_pos.T @ train_probs_pos) / train_probs_pos.size(0)
-            mean_neg = (train_probs_neg.T @ train_probs_neg) / train_probs_neg.size(0)
+
+            mean_pos = torch.einsum("ij,ik->ijk", train_probs_pos, train_probs_pos).mean(dim=0).to(self.device)
+            mean_neg = torch.einsum("ij,ik->ijk", train_probs_neg, train_probs_neg).mean(dim=0).to(self.device)
+            # mean_pos = (train_probs_pos.T @ train_probs_pos) / train_probs_pos.size(0)
+            # mean_neg = (train_probs_neg.T @ train_probs_neg) / train_probs_neg.size(0)
             self.params = -(1 - self.lbd) * mean_pos.to(self.device) + self.lbd * mean_neg.to(self.device)
             self.params = torch.tril(self.params, diagonal=-1)
             self.params = self.params + self.params.T

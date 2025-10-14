@@ -556,7 +556,7 @@ def save_cluster_legend_vertical(cmap, K, out_path="clusters_legend.pdf",
 # ---------- example usage ----------
 if __name__ == "__main__":
     setup_publication_style()
-    dataset = "cifar10_3" #imagenet3
+    dataset = "imagenet_7_fit_cluster_False" #imagenet3
     ROOT = f"cluster_examples_{dataset}"
     data = np.load(os.path.join(ROOT, "cluster_results.npz"))
     embs = data["embs"]         # shape (N, 3)
@@ -567,81 +567,81 @@ if __name__ == "__main__":
     cluster_error_vars = np.squeeze(data["cluster_error_vars"])
     cluster_intervals = np.squeeze(data["cluster_intervals"])     # or None
 
-    K = int(ensure_1d_clusters(clusters).max()) + 1
-    blend_strength = 0.9
-    red_color = (0.85, 0.12, 0.12)
-    cmap = make_cmap(K)  # deterministic palette
-    # base palette indexed by cluster id
-    base_palette = np.asarray([cmap(i) for i in range(K)])
+#     K = int(ensure_1d_clusters(clusters).max()) + 1
+#     blend_strength = 0.9
+#     red_color = (0.85, 0.12, 0.12)
+#     cmap = make_cmap(K)  # deterministic palette
+#     # base palette indexed by cluster id
+#     base_palette = np.asarray([cmap(i) for i in range(K)])
 
-    # error-aware colors_k: one RGBA per cluster
-    if cluster_error_means is not None:
-        mu = np.asarray(cluster_error_means, float)
-        mu_min, mu_max = float(mu.min()), float(mu.max())
-        denom = (mu_max - mu_min) if mu_max > mu_min else 1.0
-        w = np.clip(((mu - mu_min) / denom) * blend_strength, 0.0, 1.0)  # (K,)
+#     # error-aware colors_k: one RGBA per cluster
+#     if cluster_error_means is not None:
+#         mu = np.asarray(cluster_error_means, float)
+#         mu_min, mu_max = float(mu.min()), float(mu.max())
+#         denom = (mu_max - mu_min) if mu_max > mu_min else 1.0
+#         w = np.clip(((mu - mu_min) / denom) * blend_strength, 0.0, 1.0)  # (K,)
 
-        def _lerp_rgb(a, b, t):
-            a = np.array(a[:3]); b = np.array(b[:3])
-            rgb = (1.0 - t) * a + t * b
-            return (*rgb, 1.0)
+#         def _lerp_rgb(a, b, t):
+#             a = np.array(a[:3]); b = np.array(b[:3])
+#             rgb = (1.0 - t) * a + t * b
+#             return (*rgb, 1.0)
 
-        colors_k = np.array([_lerp_rgb(base_palette[i], red_color, w[i]) for i in range(K)])
-    else:
-        colors_k = base_palette
-    names = CLASS_INFO["cifar10"]["names"]
-    if "cifar10" in dataset:
+#         colors_k = np.array([_lerp_rgb(base_palette[i], red_color, w[i]) for i in range(K)])
+#     else:
+#         colors_k = base_palette
+#     names = CLASS_INFO["cifar10"]["names"]
+#     if "cifar10" in dataset:
 
-        plot_simplex_clusters(
-            embs=embs,
-            clusters=clusters,
-            class_labels=(names[0], names[1], names[2]),
-            out_path=os.path.join(ROOT, "simplex_clusters.pdf"),
-            s=5, alpha=0.6,
-            bar_mode="none",       # if you’re using a shared legend in LaTeX
-            cmap=cmap,
-            triangle_scale=0.80,   # smaller triangle
-            label_fs=20,           # bigger corner labels
-            label_pad=0.01,         # push labels a bit farther out if needed
-            cluster_error_means=cluster_error_means,          # <── NEW
-            red_color=red_color,      # <── NEW (match CI fn default)
-            blend_strength=blend_strength                 # <── NEW
-        )
+#         plot_simplex_clusters(
+#             embs=embs,
+#             clusters=clusters,
+#             class_labels=(names[0], names[1], names[2]),
+#             out_path=os.path.join(ROOT, "simplex_clusters.pdf"),
+#             s=5, alpha=0.6,
+#             bar_mode="none",       # if you’re using a shared legend in LaTeX
+#             cmap=cmap,
+#             triangle_scale=0.80,   # smaller triangle
+#             label_fs=20,           # bigger corner labels
+#             label_pad=0.01,         # push labels a bit farther out if needed
+#             cluster_error_means=cluster_error_means,          # <── NEW
+#             red_color=red_color,      # <── NEW (match CI fn default)
+#             blend_strength=blend_strength                 # <── NEW
+#         )
 
         
-        # plot_simplex_clusters(
-        #     embs=embs,
-        #     clusters=clusters,
-        #     class_labels=(names[0], names[1], names[2]),  # rename as you like
-        #     out_path=os.path.join(ROOT, "simplex_clusters.png"),
-        #     s=6,
-        #     alpha=0.6,
-        #     # legend_max=15
-        # )
+#         # plot_simplex_clusters(
+#         #     embs=embs,
+#         #     clusters=clusters,
+#         #     class_labels=(names[0], names[1], names[2]),  # rename as you like
+#         #     out_path=os.path.join(ROOT, "simplex_clusters.png"),
+#         #     s=6,
+#         #     alpha=0.6,
+#         #     # legend_max=15
+#         # )
 
-    plot_cluster_intervals(
-        cluster_error_means=cluster_error_means,
-        cluster_error_vars=cluster_error_vars,
-        cluster_intervals=cluster_intervals,
-        save_path=os.path.join(ROOT, "conf_intervals.png"),
-        cmap=cmap,
-        figsize=(4.2, 3),   # smaller figure
-        blend_strength=0.9,
-        gap=0.55,           # bars closer together (↓ => tighter)
-        vline_width=3.2,    # thicker CIs
-        marker_size=8.0,    # larger mean dots
-        ylabel_size=14      # bigger y-axis label
-    )
-    save_cluster_legend_vertical(cmap, K, out_path=os.path.join(ROOT, "clusters_legend.pdf"))
-    
 #     plot_cluster_intervals(
 #         cluster_error_means=cluster_error_means,
 #         cluster_error_vars=cluster_error_vars,
-#         cluster_intervals=cluster_intervals,     # or None
+#         cluster_intervals=cluster_intervals,
+#         save_path=os.path.join(ROOT, "conf_intervals.png"),
+#         cmap=cmap,
+#         figsize=(4.2, 3),   # smaller figure
+#         blend_strength=0.9,
+#         gap=0.55,           # bars closer together (↓ => tighter)
+#         vline_width=3.2,    # thicker CIs
+#         marker_size=8.0,    # larger mean dots
+#         ylabel_size=14      # bigger y-axis label
+#     )
+#     save_cluster_legend_vertical(cmap, K, out_path=os.path.join(ROOT, "clusters_legend.pdf"))
+    
+# #     plot_cluster_intervals(
+# #         cluster_error_means=cluster_error_means,
+# #         cluster_error_vars=cluster_error_vars,
+# #         cluster_intervals=cluster_intervals,     # or None
 
-#     save_path=os.path.join(ROOT, "conf_intervals.png"),
-# )   
-    # print(data["cluster_intervals"])
+# #     save_path=os.path.join(ROOT, "conf_intervals.png"),
+# # )   
+#     # print(data["cluster_intervals"])
     print_shortest_20_intervals(
         cluster_error_means=cluster_error_means,
         cluster_intervals=cluster_intervals,

@@ -1,13 +1,21 @@
 import os
+
+N_THREADS = 1
+os.environ["OMP_NUM_THREADS"]   = f"{N_THREADS}"
+os.environ["MKL_NUM_THREADS"]   = f"{N_THREADS}"
+os.environ["OPENBLAS_NUM_THREADS"] = f"{N_THREADS}"
+os.environ["NUMEXPR_NUM_THREADS"]  = f"{N_THREADS}"
+
+
 import json
 import torch
 from torch.utils.data import  DataLoader, Subset
 from torch.distributions import MultivariateNormal, Categorical
-from code.utils.models import BayesClassifier, MLPClassifier, get_model
+from code.utils.models import BayesClassifier, MLPClassifier, get_model, get_model_essentials
 from code.utils.detection.factory import get_detector
 from code.utils.datasets import GaussianMixtureDataset, get_dataset, get_synthetic_dataset
 from code.utils.eval import MultiDetectorEvaluator
-from code.utils.models import get_model_essentials
+
 import numpy as np
 
 import pandas as pd
@@ -17,7 +25,8 @@ from typing import Dict, Any, List, Tuple
 import warnings
 from copy import deepcopy
 from code.utils.detection.methods import MultiDetectors, HyperparameterSearch
-from code.utils.helper import make_config_list, _prepare_config_for_results
+from code.utils.helper import make_config_list, _prepare_config_for_results, setup_seeds
+# from code.utils.datasets.dataloader import prepare_dataloaders
 
 warnings.filterwarnings(
     "ignore",
@@ -25,18 +34,19 @@ warnings.filterwarnings(
     message=".*force_all_finite.*"
 )
 
-GPU_ID = 1
+GPU_ID = 0
+
 
 # N_THREADS = 8
 # os.environ["OMP_NUM_THREADS"]   = f"{N_THREADS}"
 # os.environ["MKL_NUM_THREADS"]   = f"{N_THREADS}"
 
-# torch.set_num_threads(N_THREADS)
-# torch.set_num_interop_threads(N_THREADS)
+torch.set_num_threads(N_THREADS)
+torch.set_num_interop_threads(N_THREADS)
 
 # # 4. Verify settings
-# print("OMP_NUM_THREADS =", os.getenv("OMP_NUM_THREADS"))
-# print("MKL_NUM_THREADS =", os.getenv("MKL_NUM_THREADS"))
+print("OMP_NUM_THREADS =", os.getenv("OMP_NUM_THREADS"))
+print("MKL_NUM_THREADS =", os.getenv("MKL_NUM_THREADS"))
 print("torch.get_num_threads() =", torch.get_num_threads())
 print("torch.get_num_interop_threads() =", torch.get_num_interop_threads())
 
@@ -87,24 +97,9 @@ def create_experiment_folder(config, results_dir = "synth_results/checking_repro
     return experiment_folder
 
 
-def setup_seeds(seed: int, seed_split: int):
-    """
-    Set random seeds for reproducibility.
-
-    Args:
-        seed (int): The seed to use.
-    """
-    random.seed(seed_split)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-
 
 def prepare_dataloaders(
-    dataset: torch.utils.data.Dataset, seed_split=None, ratio=2,
+    dataset: torch.utils.data.Dataset, seed_split=None, ratio_calib=0.5, n_train_samples=10000,
     batch_size_train=252, batch_size_test=252, train_transform=None, config=None,
 ) -> Tuple[DataLoader, DataLoader]:
     """
@@ -124,18 +119,19 @@ def prepare_dataloaders(
         # Use a generator for local reproducibility of the shuffle
         random.shuffle(perm)
 
-    n_train_samples = int(n // ratio)
-    n_train_samples = int(n * base_config["data"]["ratio_calib"])
+    # n_train_samples = int(n // ratio)
+    n_all_train = int(n * ratio_calib)
     # n_train_samples = 7000
-    # n_calib = int(n_train_samples * 0.90) 
+    # n_calib = int(n_train_samples * 0.80) 
+    n_calib = n_all_train - n_train_samples
     # n_train_samples = n_train_samples - n_calib
-    train_idx = perm[:n_train_samples]
-    # calib_idx = perm[n_train_samples:n_train_samples + n_calib]
-    test_idx = perm[n_train_samples:]
-    # test_idx = perm[n_train_samples + n_calib:]
+    train_idx = perm[n_calib: n_calib + n_train_samples]
+    calib_idx = perm[:n_calib]
+    # test_idx = perm[n_train_samples:]
+    test_idx = perm[n_train_samples + n_calib:]
 
     train_dataset = Subset(dataset, train_idx)
-    # calib_dataset = Subset(dataset, calib_idx)
+    calib_dataset = Subset(dataset, calib_idx)
     test_dataset = Subset(dataset, test_idx)
     #test_dataset = torch.utils.data.Subset(test_dataset, range(len(test_dataset) // 5, len(test_dataset)))
 
@@ -150,17 +146,18 @@ def prepare_dataloaders(
     train_loader = DataLoader(
         train_dataset, batch_size=batch_size_train, shuffle=False, pin_memory=True, num_workers=10
     )
-    # calib_loader = DataLoader(
-    #     calib_dataset, batch_size=batch_size_test, shuffle=False, pin_memory=True, num_workers=10
-    # )
+    calib_loader = DataLoader(
+        calib_dataset, batch_size=batch_size_test, shuffle=False, pin_memory=True, num_workers=10
+    )
 
     val_loader = DataLoader(
         test_dataset, batch_size=batch_size_test, shuffle=False, pin_memory=True, num_workers=10
     )
     
     print("Length of train dataset:", len(train_dataset))
+    print("Length of calib dataset:", len(calib_dataset))
     print("Length of test dataset:", len(test_dataset))
-    return train_loader, val_loader
+    return train_loader, calib_loader, val_loader
 
     
         
@@ -218,31 +215,52 @@ def main(list_configs, base_config, seed_splits):
 
     setup_seeds(base_config["seed"], seed_split)
 
-    train_loader, val_loader = prepare_dataloaders(
-        dataset, seed_split=seed_split, 
-        ratio=base_config["data"]["r"], 
+    # train_loader, calib_loader, val_loader = prepare_dataloaders(
+    #     dataset, seed_split=seed_split, 
+    #     ratio_calib=base_config["data"]["ratio_calib"], 
+    #     batch_size_train=base_config["data"]["batch_size_train"], 
+    #     batch_size_test=base_config["data"]["batch_size_test"],
+    #     train_transform=base_config["data"]["transform"],
+    #     config=base_config,
+    #     n_train_samples=num_train,
+    # )
+    from code.utils.datasets.dataloader import prepare_ablation_dataloaders
+    res_loader, cal_loader, test_loader = prepare_ablation_dataloaders(
+        dataset = dataset,
+        seed_split=seed_split, 
+        n_res=num_train,
+        n_cal=15000, 
+        n_test=25000,
         batch_size_train=base_config["data"]["batch_size_train"], 
-        batch_size_test=base_config["data"]["batch_size_test"],
-        train_transform=base_config["data"]["transform"],
-        config=base_config
-        )
+        batch_size_test=base_config["data"]["batch_size_test"], 
+        cal_transform="test", 
+        res_transform="test", 
+        data_name=base_config["data"]["name"],
+        model_name=base_config["model"]["name"],
+    )
 
-    
+    # ds = calib_loader.dataset  # likely a Subset
+    # first10 = [ds[i] for i in range(10)]  # integer indexing only
+    # torch.save(first10, "test_inputs.pt")
+
+    # print("calib 0", calib_loader.dataset[0])
+
     if (base_config["method_name"] == "clustering") & (base_config["clustering"]["name"] in ["kmeans_torch", "soft-kmeans_torch"]):
         HyperparameterSearch(
             model=model, 
             device=device, 
             base_config=base_config, 
             list_partition_hyperparams= {"temperatures": list_temperatures, "n_clusters": list_n_clusters},
-            train_loader=train_loader, 
-            # calib_loader=calib_loader,
-            val_loader=val_loader,
+            train_loader=res_loader, 
+            calib_loader=cal_loader,
+            val_loader=test_loader,
             result_folder=results_folder,
-            mode = "evaluation",
-            metric ="fpr",
-            class_subset = base_config["data"]["class_subset"]
+            mode="evaluation",
+            metric="fpr",
+            class_subset=base_config["data"]["class_subset"],
+            # hyperparam_file = hyperparam_file
             )
-        # Save the cluster centers of the best detector
+    #     # Save the cluster centers of the best detector
     # if True:
     #     detectors = [get_detector(deepcopy(config), model, device, experiment_folder, CHECKPOINTS_DIR_BASE) for config in list_configs]
 
@@ -252,11 +270,12 @@ def main(list_configs, base_config, seed_splits):
     #         device=device, 
     #         base_config=base_config, 
     #         list_configs=list_configs, 
-    #         train_loader=train_loader, 
-    #         val_loader=val_loader,
+    #         calib_loader=cal_loader, 
+    #         val_loader=test_loader,
     #         result_folder=results_folder,
-    #         # mode = "evaluation",
-    #         # metric ="roc_auc"
+    #         mode = "evaluation",
+    #         # metric ="roc_auc",
+    #         n_cal=n_cal
     #         )
             
 
@@ -273,9 +292,9 @@ if __name__ == "__main__":
             "n_samples" : 10000,
             "seed" : None,
             "seed_split" : 9,
-            "n_splits": 3,
+            "n_splits": 10,
             "n_epochs" : 1,
-            "r" : 2,
+            "r" : 0.5,
             "ratio_calib": 0.5,
             # "n_samples_train" : 5000,
             # "n_samples_test" : 5000,
@@ -308,7 +327,7 @@ if __name__ == "__main__":
         "clustering" : {
             "name" : "soft-kmeans_torch", # "kmeans", "soft-kmeans", "bregman-hard", minikmeans
             "distance" : None, # "euclidean", "kl", "js", "alpha-divergence"
-            "n_clusters" : 90,
+            "n_clusters" : 100,
             "reorder_embs" : True, # True or False
             "bound": "bernstein",
             "seed" : 1,
@@ -317,8 +336,8 @@ if __name__ == "__main__":
             "n_init" : 10, #5
             "space" : "probits", # "feature" or "classifier"
             "cov_type" : "diag",
-            "temperature" : 1.8,
-            "pred_weight" : None, # None or float
+            "temperature" : 1.5,
+            "pred_weight" : 0., # None or float
             "normalize_gini" : False,
             "batch_size": 2048,
             "reduction" : {
@@ -359,6 +378,8 @@ if __name__ == "__main__":
                 "class_weight": None,  # classifier only
             }
             }
+    num_train = 10000
+    hyperparam_file = "hyperparams_results_without-0.98-1.02_clusters-more-250.csv"
     # for seed_split in [1, 2, 3, 4, 5, 7, 8, ]:
         # base_config["data"]["seed_split"] = seed_split
     # for dataset in ["cifar10", "cifar100"]:
@@ -375,7 +396,8 @@ if __name__ == "__main__":
     # for clustering_space in ["logits", "probits"]:
     #     base_config["clustering"]["space"] = clustering_space
         # root = f"{base_config['model']['preprocessor']}_results/{base_config['data']['name']}_{base_config['model']['name']}_r-{base_config['data']['r']}_seed-split-{base_config['data']['seed_split']}"
-    root = f"fair_{base_config['model']['preprocessor']}_results/{base_config['data']['name']}_{base_config['model']['name']}_r-{base_config['data']['ratio_calib']}_seed-split-{base_config['data']['seed_split']}"
+    root = f"fair3_calib-{num_train}_{base_config['model']['preprocessor']}_results/{base_config['data']['name']}_{base_config['model']['name']}_r-{base_config['data']['ratio_calib']}_seed-split-{base_config['data']['seed_split']}"
+    # root = f"results/{base_config['data']['name']}_{base_config['model']['name']}_r-{base_config['data']['ratio_calib']}_seed-split-{base_config['data']['seed_split']}"
     if base_config['method_name'] in ["clustering", "metric_learning", "random_forest"]:
         root += f"/transform-{base_config['data']['transform']}_n-epoch{base_config['data']['n_epochs']}_n-folds{base_config['data']['n_splits']}_{base_config['clustering']['space']}"
         if base_config['method_name'] == "clustering":
@@ -406,8 +428,12 @@ if __name__ == "__main__":
     # list_temperatures = [0.1 + 0.1 * i for i in range(10)]  # 0.1, 0.2, ..., 1.0
     # list_temperatures = [3 +0.5 * i for i in range(10)]  # 3.0, 3.5, ..., 7.0
     # for exp in range (6):
-    list_temperatures = None # [0.98, 1.0, 1.02, 1.03, 1.04, 1.05]  # 1.0, 1.1, 1.2
-    list_n_clusters = None # [190 + 3 * i for i in range(20)] #[5 + 2 * i for i in range(20)]
+    list_temperatures = None #[1., 1.05, 1.1, 1.15, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9]#[0.96, 0.98, 1., 1.02, 1.05, 1.1, 1.15] # [0.98, 1.0, 1.02, 1.03, 1.04, 1.05]  # 1.0, 1.1, 1.2
+    list_n_clusters =  None # [150, 160, 170, 180, 190, 200, 210, 220, 230, 240, 250, 260, 270, 280, 290, 300, 310, 320, 330]# [150, 160, 170, 180, 190, 200, 210, 220, 230, 240] # [190 + 3 * i for i in range(20)] #[5 + 2 * i for i in range(20)]
+
+    # For tiny 
+    # list_temperatures = [1., 1.05, 1.1]
+    # list_n_clusters = [150, 160, 170, 180, 190, 200, 210, 220, 230, 240]
     # list_n_clusters = [10 + 2 * i for i in range(20)] 
     # list_n_clusters = [100  + 50 * exp +  5 * i for i in range(10)]
 
@@ -426,8 +452,8 @@ if __name__ == "__main__":
         # 'logistic.C': [0.001, 0.005, 0.01, 0.05, 0.1, 1, 10, 100],
         # 'logistic.reorder_embs': [True, False],
         # 'logistic.temperature': temperatures,
-        # 'gini.magnitude': [0 + 0.0005 * i for i in range(20)],
-        # 'gini.temperature': [0.5 + 0.1 * i for i in range(20)], # [0.5 + 0.1 * i for i in range(20)],
+        # 'gini.magnitude': [0 + 0.002 * i for i in range(2)], # 10, 7
+        # 'gini.temperature': [0.7 + 0.1 * i for i in range(2)], # [0.5 + 0.1 * i for i in range(20)],
         # 'data.transform': ["test", "custom1"]
         # 'max_proba.temperature': [0.7 + 0.1 * i for i in range(7)], #[0.7 + 0.1 * i for i in range(7)],  # 0.7, 0.8, ..., 1.3
         # 'max_proba.magnitude': [0. + 0.002 * i for i in range(10)] #[0. + 0.002 * i for i in range(10)],  # 0.001, 0.002, ..., 0.02
@@ -446,10 +472,14 @@ if __name__ == "__main__":
 
     list_configs = make_config_list(base_config, parameter_space)  # test the function
 
-    list_conifgs = None
-    
+    # list_configs = None
+
     import time
     t0 = time.time()
+    # for seed_split in range(1, 10):
+    #     for n_cal in [500, 1000, 2000, 3000, 4000, 5000]:
+    #         base_config["data"]["seed_split"] = seed_split
+    
     main(list_configs, base_config, base_config["data"]["seed_split"])
     t1 = time.time()
     print(f"Total time: {t1 - t0:.2f} seconds")
