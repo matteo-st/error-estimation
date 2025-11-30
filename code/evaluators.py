@@ -167,64 +167,64 @@ class EvaluatorAblation:
             self.values[f"{name}"] = {"logits": all_logits, "detector_labels": all_detector_labels, "targets": all_labels}
 
 
-    def get_detector(self):
+    # def get_detector(self):
 
-        if self.postprocessor_name == "clustering":
-            if self.cfg_detection["postprocessor_args"]["method"] not in ["soft-kmeans_torch"]:
+    #     if self.postprocessor_name == "clustering":
+    #         if self.cfg_detection["postprocessor_args"]["method"] not in ["soft-kmeans_torch"]:
 
-                self.detector = PartitionDetector(
-                    model=None, 
-                    n_clusters=self.cfg_detection["postprocessor_args"]["n_clusters"], 
-                    alpha=self.cfg_detection["postprocessor_args"]["alpha"], 
-                    name=self.cfg_detection["postprocessor_args"]["method"],
-                    n_classes=self.cfg_detection["postprocessor_args"]["n_classes"], 
-                    seed=self.cfg_detection["postprocessor_args"]["clustering_seed"], 
-                    init_scheme=self.cfg_detection["postprocessor_args"]["init_scheme"], # "random" or "k-means++", 
-                    n_init=self.cfg_detection["postprocessor_args"]["n_init"], # Number of initializations for k-means
-                    space=self.cfg_detection["postprocessor_args"]["space"], 
-                    temperature=self.cfg_detection["postprocessor_args"]["temperature"], 
-                    cov_type = self.cfg_detection["postprocessor_args"]["cov_type"],
-                    reorder_embs=self.cfg_detection["postprocessor_args"]["reorder_embs"], # Whether to reorder the embeddings based on the clustering
-                    experiment_folder=self.result_folder,
-                    bound=self.cfg_detection["postprocessor_args"]["bound"],
-                    pred_weight=self.cfg_detection["postprocessor_args"]["pred_weights"],
-                    batch_size=2048,
-                    device=self.device
-                    )
-            else:
-                self.detector = MegaPartitionDetector(
-                    model=None, 
-                    list_n_cluster=[self.cfg_detection["postprocessor_args"]["n_clusters"]],
-                    alpha=self.cfg_detection["postprocessor_args"]["alpha"], 
-                    name=self.cfg_detection["postprocessor_args"]["method"],
-                    n_classes=self.cfg_detection["postprocessor_args"]["n_classes"], 
-                    seed=self.cfg_detection["postprocessor_args"]["clustering_seed"], 
-                    init_scheme=self.cfg_detection["postprocessor_args"]["init_scheme"],
-                    n_init=self.cfg_detection["postprocessor_args"]["n_init"],
-                    space=self.cfg_detection["postprocessor_args"]["space"],
-                    temperature=self.cfg_detection["postprocessor_args"]["temperature"],                     # single temp here
-                    cov_type=self.cfg_detection["postprocessor_args"]["cov_type"],
-                    reorder_embs=self.cfg_detection["postprocessor_args"]["reorder_embs"],
-                    bound=self.cfg_detection["postprocessor_args"]["bound"],
-                    pred_weight=self.cfg_detection["postprocessor_args"].get("pred_weights", None),
-                    batch_size=2048,
-                    device=self.device,
-                    experiment_folder=self.result_folder,
-                )
-        elif self.postprocessor_name == "relu":
-            self.detector = MetricLearningLagrange(
-                model=None, 
-                lbd=self.cfg_detection["postprocessor_args"]["lambda"], 
-                temperature=self.cfg_detection["postprocessor_args"]["temperature"],
-                device=self.device
-                )
-        # else:
-        #     self.detector = get_postprocessor(
-        #         name=self.method, 
-        #         model=self.model, 
-        #         cfg=self.cfg_detection["postprocessor_args"], 
-        #         device=self.device
-        #         )
+    #             self.detector = PartitionDetector(
+    #                 model=None, 
+    #                 n_clusters=self.cfg_detection["postprocessor_args"]["n_clusters"], 
+    #                 alpha=self.cfg_detection["postprocessor_args"]["alpha"], 
+    #                 name=self.cfg_detection["postprocessor_args"]["method"],
+    #                 n_classes=self.cfg_detection["postprocessor_args"]["n_classes"], 
+    #                 seed=self.cfg_detection["postprocessor_args"]["clustering_seed"], 
+    #                 init_scheme=self.cfg_detection["postprocessor_args"]["init_scheme"], # "random" or "k-means++", 
+    #                 n_init=self.cfg_detection["postprocessor_args"]["n_init"], # Number of initializations for k-means
+    #                 space=self.cfg_detection["postprocessor_args"]["space"], 
+    #                 temperature=self.cfg_detection["postprocessor_args"]["temperature"], 
+    #                 cov_type = self.cfg_detection["postprocessor_args"]["cov_type"],
+    #                 reorder_embs=self.cfg_detection["postprocessor_args"]["reorder_embs"], # Whether to reorder the embeddings based on the clustering
+    #                 experiment_folder=self.result_folder,
+    #                 bound=self.cfg_detection["postprocessor_args"]["bound"],
+    #                 pred_weight=self.cfg_detection["postprocessor_args"]["pred_weights"],
+    #                 batch_size=2048,
+    #                 device=self.device
+    #                 )
+    #         else:
+    #             self.detector = MegaPartitionDetector(
+    #                 model=None, 
+    #                 list_n_cluster=[self.cfg_detection["postprocessor_args"]["n_clusters"]],
+    #                 alpha=self.cfg_detection["postprocessor_args"]["alpha"], 
+    #                 name=self.cfg_detection["postprocessor_args"]["method"],
+    #                 n_classes=self.cfg_detection["postprocessor_args"]["n_classes"], 
+    #                 seed=self.cfg_detection["postprocessor_args"]["clustering_seed"], 
+    #                 init_scheme=self.cfg_detection["postprocessor_args"]["init_scheme"],
+    #                 n_init=self.cfg_detection["postprocessor_args"]["n_init"],
+    #                 space=self.cfg_detection["postprocessor_args"]["space"],
+    #                 temperature=self.cfg_detection["postprocessor_args"]["temperature"],                     # single temp here
+    #                 cov_type=self.cfg_detection["postprocessor_args"]["cov_type"],
+    #                 reorder_embs=self.cfg_detection["postprocessor_args"]["reorder_embs"],
+    #                 bound=self.cfg_detection["postprocessor_args"]["bound"],
+    #                 pred_weight=self.cfg_detection["postprocessor_args"].get("pred_weights", None),
+    #                 batch_size=2048,
+    #                 device=self.device,
+    #                 experiment_folder=self.result_folder,
+    #             )
+    #     elif self.postprocessor_name == "relu":
+    #         self.detector = MetricLearningLagrange(
+    #             model=None, 
+    #             lbd=self.cfg_detection["postprocessor_args"]["lambda"], 
+    #             temperature=self.cfg_detection["postprocessor_args"]["temperature"],
+    #             device=self.device
+    #             )
+    #     # else:
+    #     #     self.detector = get_postprocessor(
+    #     #         name=self.method, 
+    #     #         model=self.model, 
+    #     #         cfg=self.cfg_detection["postprocessor_args"], 
+    #     #         device=self.device
+    #     #         )
 
 
     def save_results(self, result_file, results, mode="append"):
