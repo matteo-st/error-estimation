@@ -108,7 +108,7 @@ def read_table(
     if hyperparam:
         candidate_basenames = ["hyperparams_results"]
     else:
-        candidate_basenames = ["results_opt_fpr", "all_results"]  # <- accept both
+        candidate_basenames = ["results_opt_fpr", "results_opt_fpr_", "all_results"]  # <- accept both
 
     # Build (basename -> regex) for suffix parsing
     regex_by_base = {
@@ -183,6 +183,52 @@ def read_table(
     return pd.concat(dfs, axis=0, ignore_index=True)
 
 
+def pretty_name(name: str) -> str:
+    """
+    Map raw keys (models or metrics) to nice display names.
+    - Keeps underscores so metric keys like 'fpr_val_cross' match.
+    - Still strips spaces and hyphens; lowercases for robust lookup.
+    """
+    # key = name.strip().lower().replace(" ", "").replace("-", "")  # NOTE: no .replace("_","")
+
+    table = {
+        # --- Datasets ---
+        "cifar10": "CIFAR-10",
+        "cifar100": "CIFAR-100",
+        "imagenet": "ImageNet",
+        # --- Models ---
+        "resnet34": "ResNet-34",
+        "densenet121": "DenseNet-121",
+        "timm_vit_base16": "ViT-B/16",
+        "timm_vit_tiny16": "ViT-Tiny/16",
+        # --- Metrics (val_cross variants etc.) ---
+        "aupr_val_cross": "AUPR",
+        "auroc_val_cross": "AUROC",
+        "fpr_val_cross": "FPR@95",
+        "fpr_val": "FPR@95",
+        "fpr_test": "FPR@95",
+        "aurc_val_cross": "AURC",
+        "aupr_err_val_cross": "AUPR-Err",
+        "aupr_success_val_cross": "AUPR-Succ",
+        # common alternates (optional)
+        "roc_auc_val": "AUROC",
+        "aurc_val": "AURC",
+        "fpr_val": "FPR@95",
+        "aupr_err_val": "AUPR-Err",
+        "aupr_success_val": "AUPR-Succ",
+        # Variable
+        "temperature": "Temperature",
+        "n_clusters": r"Number of level sets $\mathcal{X}_z$ (i.e., $|\mathcal{Z}|$)"
+
+    }
+
+    if name in table:
+        return table[name]
+    else:
+        raise KeyError(f"pretty_name: no mapping for '{name}' (key='{name}')")
+
+ 
+
 RESULTS_FILES = {
     "cifar10": {
         "resnet34": {
@@ -228,4 +274,150 @@ RESULTS_FILES = {
             "max_proba": "results/imagenet_timm_vit_tiny16_r-2_seed-split-9/transform-test_max_proba",
         },
     },
+    "imagenet_fair": {
+        "timm_vit_base16": {
+            "clustering": "fair_ce_results/imagenet_timm_vit_base16_r-0.5_seed-split-9/transform-test_n-epoch1_n-folds3_probits_soft-kmeans_torch_bernstein_n-init-10_kmeans_clustering",
+        },
+        "timm_vit_tiny16": {
+            "clustering": "fair_ce_results/imagenet_timm_vit_tiny16_r-0.5_seed-split-9/transform-test_n-epoch1_n-folds3_probits_soft-kmeans_torch_bernstein_n-init-10_kmeans_clustering",
+        },
+    },
 }
+
+
+
+OFFICIAL_RESULTS_FILES = {
+    "cifar10": {
+        "resnet34": {
+            "clustering_hyperparams": "results/cifar10_resnet34_r-2_seed-split-9/transform-test_n-epoch1_n-folds10_probits_probweights_clustering/hyperparams_results.csv",
+            "clustering_opt": "results/cifar10_resnet34_r-2_seed-split-9/transform-test_n-epoch1_n-folds10_probits_probweights_clustering/all_results.csv",
+            "metric_learning": "results/cifar10_resnet34_r-2_seed-split-9/transform-test_n-epoch1_metric_learning",
+            "gini": "results/cifar10_resnet34_r-2_seed-split-9/transform-test_gini",
+            "max_proba": "results/cifar10_resnet34_r-2_seed-split-9/transform-test_max_proba",
+        },
+        "densenet121": {
+            "clustering_hyperparams": "results/cifar10_densenet121_r-2_seed-split-9/transform-test_n-epoch1_n-folds10_probits_predweight_clustering/hyperparams_results.csv",
+            "clustering_opt": "results/cifar10_densenet121_r-2_seed-split-9/transform-test_n-epoch1_n-folds10_probits_predweight_clustering/all_results.csv",
+            "metric_learning": "results/cifar10_densenet121_r-2_seed-split-9/transform-test_n-epoch1_metric_learning",
+            "gini": "results/cifar10_densenet121_r-2_seed-split-9/transform-test_gini",
+            "max_proba": "results/cifar10_densenet121_r-2_seed-split-9/transform-test_max_proba",
+        },
+    },
+    "cifar100": {
+        "resnet34": {
+            "clustering_hyperparams": "results/cifar100_resnet34_r-2_seed-split-9/transform-test_n-epoch1_n-folds3_probits_clustering/hyperparams_results.csv",
+            "clustering_opt": "results/cifar100_resnet34_r-2_seed-split-9/transform-test_n-epoch1_n-folds3_probits_clustering/all_results.csv",
+            "metric_learning": "results/cifar100_resnet34_r-2_seed-split-9/transform-test_n-epoch1_metric_learning",
+            "gini": "results/cifar100_resnet34_r-2_seed-split-9/transform-test_gini_normalized-True",
+            "max_proba": "results/cifar100_resnet34_r-2_seed-split-9/transform-test_max_proba",
+        },
+        "densenet121": {
+            "clustering_hyperparams": "results/cifar100_densenet121_r-2_seed-split-9/transform-test_n-epoch1_n-folds10_probits_predweight_clustering/hyperparams_results.csv",
+            "clustering_opt": "results/cifar100_densenet121_r-2_seed-split-9/transform-test_n-epoch1_n-folds10_probits_predweight_clustering/all_results.csv",
+            "metric_learning": "results/cifar100_densenet121_r-2_seed-split-9/transform-test_n-epoch1_metric_learning",
+            "gini": "results/cifar100_densenet121_r-2_seed-split-9/transform-test_gini",
+            "max_proba": "results/cifar100_densenet121_r-2_seed-split-9/transform-test_max_proba",
+
+        },
+
+    },
+    "imagenet": {
+        "timm_vit_base16": {
+            "clustering_hyperparams": "fair_ce_results/imagenet_timm_vit_base16_r-0.5_seed-split-9/transform-test_n-epoch1_n-folds3_probits_soft-kmeans_torch_bernstein_n-init-10_kmeans_clustering/hyperparams_results.csv",
+            "clustering_opt": "fair_ce_results/imagenet_timm_vit_base16_r-0.5_seed-split-9/transform-test_n-epoch1_n-folds3_probits_soft-kmeans_torch_bernstein_n-init-10_kmeans_clustering/results_opt_fpr.csv",
+            "metric_learning": "results/imagenet_timm_vit_base16_r-2_seed-split-9/transform-test_n-epoch1_probits_metric_learning",
+            "gini": "results/imagenet_timm_vit_base16_r-2_seed-split-9/transform-test_gini",
+            "max_proba": "results/imagenet_timm_vit_base16_r-2_seed-split-9/transform-test_max_proba",
+        },
+        "timm_vit_tiny16": {
+            "clustering_hyperparams": "fair_ce_results/imagenet_timm_vit_tiny16_r-0.5_seed-split-9/transform-test_n-epoch1_n-folds3_probits_soft-kmeans_torch_bernstein_n-init-10_kmeans_clustering/hyperparams_results_2.csv",
+            "clustering_opt": "fair_ce_results/imagenet_timm_vit_tiny16_r-0.5_seed-split-9/transform-test_n-epoch1_n-folds3_probits_soft-kmeans_torch_bernstein_n-init-10_kmeans_clustering/results_opt_fpr_2.csv",
+            "metric_learning": "results/imagenet_timm_vit_tiny16_r-2_seed-split-9/transform-test_n-epoch1_probits_metric_learning",
+            "gini": "results/imagenet_timm_vit_tiny16_r-2_seed-split-9/transform-test_normalized-False_gini",
+            "max_proba": "results/imagenet_timm_vit_tiny16_r-2_seed-split-9/transform-test_max_proba",
+        },
+    },
+}
+
+
+NEW_OFFICIAL_RESULTS_FILES = {
+    "cifar10": {
+        "resnet34": {
+            "clustering_hyperparams": "results/cifar10_resnet34_r-2_seed-split-9/transform-test_n-epoch1_n-folds10_probits_probweights_clustering/hyperparams_results.csv",
+            "clustering_opt": "results/cifar10_resnet34_r-2_seed-split-9/transform-test_n-epoch1_n-folds10_probits_probweights_clustering/all_results.csv",
+            "metric_learning": "results/cifar10_resnet34_r-2_seed-split-9/transform-test_n-epoch1_metric_learning",
+            "gini": "results/cifar10_resnet34_r-2_seed-split-9/transform-test_gini",
+            "max_proba": "results/cifar10_resnet34_r-2_seed-split-9/transform-test_max_proba",
+        },
+        "densenet121": {
+            "clustering_hyperparams": "results/cifar10_densenet121_r-2_seed-split-9/transform-test_n-epoch1_n-folds10_probits_predweight_clustering/hyperparams_results.csv",
+            "clustering_opt": "results/cifar10_densenet121_r-2_seed-split-9/transform-test_n-epoch1_n-folds10_probits_predweight_clustering/all_results.csv",
+            "metric_learning": "results/cifar10_densenet121_r-2_seed-split-9/transform-test_n-epoch1_metric_learning",
+            "gini": "results/cifar10_densenet121_r-2_seed-split-9/transform-test_gini",
+            "max_proba": "results/cifar10_densenet121_r-2_seed-split-9/transform-test_max_proba",
+        },
+    },
+    "cifar100": {
+        "resnet34": {
+            "clustering_hyperparams": "results/cifar100_resnet34_r-2_seed-split-9/transform-test_n-epoch1_n-folds3_probits_clustering/hyperparams_results.csv",
+            "clustering_opt": "results/cifar100_resnet34_r-2_seed-split-9/transform-test_n-epoch1_n-folds3_probits_clustering/all_results.csv",
+            "metric_learning": "results/cifar100_resnet34_r-2_seed-split-9/transform-test_n-epoch1_metric_learning",
+            "gini": "results/cifar100_resnet34_r-2_seed-split-9/transform-test_gini_normalized-True",
+            "max_proba": "results/cifar100_resnet34_r-2_seed-split-9/transform-test_max_proba",
+        },
+        "densenet121": {
+            "clustering_hyperparams": "results/cifar100_densenet121_r-2_seed-split-9/transform-test_n-epoch1_n-folds10_probits_predweight_clustering/hyperparams_results.csv",
+            "clustering_opt": "results/cifar100_densenet121_r-2_seed-split-9/transform-test_n-epoch1_n-folds10_probits_predweight_clustering/all_results.csv",
+            "metric_learning": "results/cifar100_densenet121_r-2_seed-split-9/transform-test_n-epoch1_metric_learning",
+            "gini": "results/cifar100_densenet121_r-2_seed-split-9/transform-test_gini",
+            "max_proba": "results/cifar100_densenet121_r-2_seed-split-9/transform-test_max_proba",
+
+        },
+
+    },
+    "imagenet": {
+        "timm_vit_base16": {
+            "clustering_hyperparams": "fair3_calib-1250_ce_results/imagenet_timm_vit_base16_r-0.5_seed-split-9/transform-test_n-epoch1_n-folds10_probits_soft-kmeans_torch_bernstein_n-init-10_kmeans_clustering/hyperparams_results_without-1.15_1.1_cluster-more-250.csv",
+            "clustering_opt": "fair3_calib-1250_ce_results/imagenet_timm_vit_base16_r-0.5_seed-split-9/transform-test_n-epoch1_n-folds10_probits_soft-kmeans_torch_bernstein_n-init-10_kmeans_clustering/hyperparams_results_without-1.15_1.1_cluster-more-250._opt_fpr.csv",
+            "metric_learning": "results/imagenet_timm_vit_base16_r-2_seed-split-9/transform-test_n-epoch1_probits_metric_learning",
+            "gini": "results/imagenet_timm_vit_base16_r-2_seed-split-9/transform-test_gini",
+            "max_proba": "results/imagenet_timm_vit_base16_r-2_seed-split-9/transform-test_max_proba",
+        },
+        "timm_vit_tiny16": {
+            "clustering_hyperparams": "fair3_calib-1250_ce_results/imagenet_timm_vit_tiny16_r-0.5_seed-split-9/transform-test_n-epoch1_n-folds10_probits_soft-kmeans_torch_bernstein_n-init-10_kmeans_clustering/hyperparams_results_without-1.02_clusters-more-300.csv",
+            "clustering_opt": "fair3_calib-1250_ce_results/imagenet_timm_vit_tiny16_r-0.5_seed-split-9/transform-test_n-epoch1_n-folds10_probits_soft-kmeans_torch_bernstein_n-init-10_kmeans_clustering/hyperparams_results_without-1.02_clusters-more-300._opt_fpr.csv",
+            "metric_learning": "results/imagenet_timm_vit_tiny16_r-2_seed-split-9/transform-test_n-epoch1_probits_metric_learning",
+            "gini": "results/imagenet_timm_vit_tiny16_r-2_seed-split-9/transform-test_normalized-False_gini",
+            "max_proba": "results/imagenet_timm_vit_tiny16_r-2_seed-split-9/transform-test_max_proba",
+        },
+    },
+}
+
+LIST_DATASETS = list(NEW_OFFICIAL_RESULTS_FILES.keys())
+LIST_MODELS = {dataset: [] for dataset in NEW_OFFICIAL_RESULTS_FILES}
+for dataset in NEW_OFFICIAL_RESULTS_FILES.keys():
+    for model in NEW_OFFICIAL_RESULTS_FILES[dataset].keys():
+    
+        LIST_MODELS[dataset].append(model)
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Print summary table of results.")
+    parser.add_argument("--data_name",  default="cifar10",
+                        help="Dataset namme")
+    parser.add_argument("--model_name", type=str, default="resnet34",
+                        help="Model name.")
+    parser.add_argument("--method_name", type=str, default="clustering",
+                        help="Method name.")
+    parser.add_argument("--hyperparam", action="store_true", default=False)
+    parser.add_argument("--metric", type=str, default="fpr_val_cross")
+    args = parser.parse_args()
+    df = read_table(
+        data_name=args.data_name,
+        model_name=args.model_name,
+        method_name=args.method_name,
+        hyperparam=args.hyperparam,
+    )
+    method_cols = [col for col in df.columns if col.startswith(f"{args.method_name}_")]
+    cols = method_cols + [args.metric] + ["file_num", "source_file"]
+    print(df[cols].sort_values(by=args.metric, ascending=True).to_string(index=False))

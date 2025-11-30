@@ -8,6 +8,46 @@ import pandas as pd
 import re
 import glob
 
+import torch
+import random
+import numpy as np
+
+import copy 
+def make_grid(cfg_detection, key ="ablation_args"):
+    base = deepcopy(cfg_detection["postprocessor_args"])
+    keys = cfg_detection[key].keys()
+    for vals in product(*cfg_detection[key].values()):
+        cfg = deepcopy(base)
+        cfg.update(zip(keys, vals))
+        yield cfg
+
+def metric_direction(metric: str) -> str:
+
+    dic = {
+        "fpr": "min",
+        "roc_auc": "max",
+        "aurc": "min",
+        "aupr_err": "max",
+        "aupr_success": "max",
+    }
+    if metric not in dic:
+        raise ValueError(f"Unknown metric '{metric}'")
+    return dic[metric]
+
+
+def setup_seeds(seed: int, seed_split: int):
+    """
+    Set random seeds for reproducibility.
+
+    Args:
+        seed (int): The seed to use.
+    """
+    random.seed(seed_split)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def read_table(

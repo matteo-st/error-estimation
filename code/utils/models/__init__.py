@@ -123,8 +123,8 @@ def TimmViTTiny16ImageNet(features_nodes=None):
     # get model specific transforms (normalization, resize)
     data_config = timm.data.resolve_model_data_config(model)
     transforms = timm.data.create_transform(**data_config, is_training=False)
-    print("data_config", data_config)
-    print("transforms", transforms)
+    # print("data_config", data_config)
+    # print("transforms", transforms)
     # exit()
     input_dim = (3, 224, 224)
     if features_nodes is None:
@@ -258,11 +258,11 @@ def get_model_essentials(model, dataset, features_nodes=None) -> Dict[str, Any]:
 def get_model(model_name: str, 
               dataset_name: str, 
               n_classes: int,
-              input_dim,
-              model_seed, 
-              checkpoint_dir,
-              desired_indices=[5, 3, 8]) -> torch.nn.Module:
-    print("desired_indices", desired_indices)
+              input_dim=None,
+              model_seed=1, 
+              checkpoint_dir=None,
+              desired_indices=None) -> torch.nn.Module:
+    # print("desired_indices", desired_indices)
   
     if model_name == "mlp_synth_dim-10_classes-7":
        
@@ -353,8 +353,9 @@ def get_model(model_name: str,
     # print("Missing:", missing_keys)
     # print("Unexpected:", unexpected_keys)
 
-    # if desired_indices is not None:
-    model = SubsetLogitWrapper(model, desired_indices)
+    if desired_indices is not None:
+        print("Subsetting model to classes:", desired_indices)
+        model = SubsetLogitWrapper(model, desired_indices)
     
     return model
 

@@ -447,6 +447,246 @@ def risks_coverages_selective_net(scores, pred, targets, sort=True):
 
 #         return list_results
 
+class AblationDetector:
+    def __init__(
+        self,
+        model: torch.nn.Module,
+        dataloader: torch.utils.data.DataLoader,
+        device: torch.device,
+        suffix = "train",
+        latent_path=None,
+        postprocessor_name="clustering",
+        cfg_dataset=None,
+
+    ):
+        """
+        Evaluate a single model against multiple post-hoc detectors.
+
+        Args:
+            model:                A trained classifier (outputs raw logits).
+            dataloader:           DataLoader for the evaluation set.
+            device:               torch.device to run model & detectors on.
+            magnitude:            If >0, craft a one‐step adversarial example
+                                  against each detector as in your original.
+        """
+        self.model = model
+        self.loader = dataloader
+        self.device = device
+        self.suffix = suffix
+        self.postprocessor_name = postprocessor_name
+        
+        self.cfg_dataset = cfg_dataset
+        self.num_classes = cfg_dataset["num_classes"]
+        
+    
+        self.scores = None  # Precomputed scores, if any
+        self.latent_path = latent_path
+
+    def get_pertubated_scores(self, inputs, detector, magnitude):
+
+        # inputs = inputs.to(self.device)
+        inputs = inputs.to(self.device).detach().requires_grad_(True) 
+
+        # inputs = Variable(inputs.clone(), requires_grad=True)
+        adv_logits = self.model(inputs)
+        scores = detector(logits=adv_logits)           # initial
+        # backprop on log-score
+        loss = torch.log(scores + 1e-12).sum()
+        # loss = torch.log(scores.clamp_min(1e-12)).sum()
+        # loss.backward()
+        # step and detach
+        grad_inputs, = torch.autograd.grad(loss, inputs, retain_graph=False, create_graph=False)
+        with torch.no_grad():
+            adv = inputs + magnitude * grad_inputs.sign()
+        # inputs = (inputs + magnitude * inputs.grad.sign()).detach()
+        # inputs = Variable(inputs, requires_grad=False)
+        with torch.inference_mode():
+            logits_adv = self.model(adv)
+            scores_adv = detector(logits=logits_adv)
+        # with torch.no_grad():
+        #     scores_adv = detector(inputs=inputs)
+
+        return scores_adv
+
+
+    
+    
+    
+
+    def get_scores(self, detectors, n_samples, list_configs, logits=None):
+
+        n_det = len(detectors)
+        if os.path.exists(self.latent_path):
+
+            pkg = torch.load(self.latent_path, map_location="cpu")
+            logits = pkg["logits"].to(torch.float32).to(self.device)        # (N, C)
+            all_labels = pkg["labels"].numpy()                  # (N,)
+            all_model_preds  = pkg["model_preds"].numpy()             # (N,)
+            detector_labels_arr = (all_model_preds != all_labels)  # bool array
+
+            if self.postprocessor_name in ["doctor", "odin", "relu"]:
+
+                self.model.to(self.device)
+                self.model.eval()
+                all_scores = [np.zeros(n_samples, dtype=float) for _ in range(n_det)]
+                for idx, dec in tqdm(enumerate(detectors), total=len(detectors), desc="Getting Detectors Scores", leave=False):
+                    magnitude = list_configs[idx]['magnitude']
+                    
+                    if magnitude > 0:
+                        
+                        self.model.eval()
+                        write=0
+                        
+                        for inputs, labels in self.loader:
+                            bs = inputs.size(0)
+                            scores = self.get_pertubated_scores(inputs, dec, magnitude)
+                            if isinstance(scores, torch.Tensor):
+                                scores = scores.detach().cpu().numpy()
+                            all_scores[idx][write:write+bs] = scores
+                            write += bs
+                    else:
+                        with torch.no_grad():
+                            scores = dec(logits=logits).cpu().numpy()
+                        all_scores[idx][:] = scores
+
+            else:
+                all_scores = [detector(logits=logits).cpu().numpy() for detector in detectors]
+                # print("all scores shape:", np.array(all_scores).shape)
+                # all_scores = [detector(logits=logits).cpu().numpy() for detector in detectors]
+
+        else:
+            
+            all_scores = [np.zeros(n_samples, dtype=float) for _ in range(n_det)]
+            all_labels = np.zeros(n_samples, dtype=int)
+            all_model_preds = np.zeros(n_samples, dtype=int)
+            detector_labels_arr = np.zeros(n_samples, dtype=bool)
+            all_logits = np.zeros((n_samples, self.num_classes), dtype=float)
+            
+
+            # iterate once over data
+            idx = 0
+
+            self.model.to(self.device)
+            self.model.eval()
+            for inputs, labels in tqdm(self.loader, desc="Getting Detectors Scores", leave=False):
+                bs = inputs.size(0)
+                inputs = inputs.to(self.device)             
+                labels = labels.to(self.device)
+
+                # forward pass for model accuracy & labels
+                with torch.no_grad():
+                    logits = self.model(inputs)
+                    model_preds = torch.argmax(logits, dim=1)
+
+
+                det_lab = (model_preds != labels).cpu().numpy()
+                detector_labels_arr[idx: idx+bs] = det_lab
+                all_labels[idx: idx+bs] = labels.cpu().numpy()
+                all_model_preds[idx: idx+bs] = model_preds.cpu().numpy()
+                all_logits[idx: idx+bs] = logits.cpu().numpy()
+
+                # now each detector
+                for i, det in enumerate(detectors):
+                    # -- optionally craft 1‑step adv example per detector
+                    if self.postprocessor_name in ["doctor", "odin", "relu"]:
+                        magnitude = list_configs[i]['magnitude']
+                        if magnitude > 0:
+                            scores = self.get_pertubated_scores(inputs, det, magnitude)
+                        else:
+                            with torch.no_grad():
+                                scores = det(logits=logits)
+                    else:
+                        with torch.no_grad():
+                            scores = det(logits=logits)
+                    if isinstance(scores, torch.Tensor):
+                        scores = scores.cpu().numpy()
+                    all_scores[i][idx: idx+bs] = scores
+                    
+                idx += bs
+
+            # AFTER (robust)
+            parent = os.path.dirname(self.latent_path)
+            os.makedirs(parent, exist_ok=True)
+
+            if self.latent_path is not None:
+                tmp = self.latent_path + ".tmp"
+                torch.save(
+                    {
+                        "logits": torch.tensor(all_logits),     # compact on disk
+                        "labels": torch.tensor(all_labels).to(torch.int64),
+                        "model_preds": torch.tensor(all_model_preds).to(torch.int64),
+                    },
+                    tmp,
+                )
+                os.replace(tmp, self.latent_path)  # atomic rename
+        # print("all_scores shape:", all_scores.shape)
+        # print("detector_labels_arr shape:", detector_labels_arr.shape)
+        self.scores = {
+            "scores": all_scores,
+            "detector_labels": detector_labels_arr
+        } 
+
+    def evaluate(
+            self, 
+            list_configs, 
+            detectors=None, 
+            all_scores=None, 
+            detector_labels=None, 
+            suffix=None) -> list[dict]:
+        """
+        Run the model once per batch, then each detector on those inputs.
+
+        Args:
+            detectors:  Either a list of detector‐objects or a dict name→detector.
+                        Each detector must be callable as:
+                            scores = detector(inputs=..., logits=...)
+                        and return a 1‐D tensor of “outlier scores” (higher = more likely error).
+
+        Returns:
+            results: dict mapping detector_name → metrics dict, e.g.
+                {
+                  "ODIN": {
+                      "fpr@95tpr": 0.12,
+                      "roc_auc": 0.94,
+                      "aupr_err": 0.88,
+                      "aupr_in": 0.90,
+                      "aurc": 0.23,
+                      "model_acc": 0.79,  # same for all detectors
+                  },
+                  …
+                }
+        """
+        # normalize detectors into an ordered dict name→detector
+
+        # storage
+        n_samples = len(self.loader.dataset)
+        if all_scores is None:
+            self.get_scores(detectors, n_samples, list_configs)
+            all_scores = self.scores["scores"]
+            detector_labels = self.scores["detector_labels"]  # bool array
+     
+        list_results = []
+        for i, scores in enumerate(all_scores):
+        
+            results = compute_all_metrics(
+                conf=scores,
+                detector_labels=detector_labels,
+            )
+            
+            results = pd.DataFrame([results])
+            
+            suffix = suffix if suffix is not None else self.suffix
+            results.columns = [f"{col}_{suffix}" for col in results.columns]
+            
+            
+            # config = _prepare_config_for_results(list_configs[i])
+            # config = pd.json_normalize(config, sep="_")
+            config = pd.DataFrame([list_configs[i]])
+            results = pd.concat([config, results], axis=1)
+            list_results.append(results)
+
+        return list_results
+
 
 class MultiDetectorEvaluator:
     def __init__(

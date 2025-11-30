@@ -2,6 +2,8 @@
 from sklearn import metrics
 import numpy as np
 
+LIST_METRICS = ['fpr', 'tpr', 'thr', 'roc_auc', 'accuracy', 'aurc', 'aupr_in', 'aupr_out']
+
 def fpr_at_fixed_tpr(fprs, tprs, thresholds, tpr_level: float = 0.95):
     
     idxs = [i for i, x in enumerate(tprs) if x >= tpr_level]
@@ -38,8 +40,55 @@ def auc_and_fpr_recall(conf, label, tpr_level: float = 0.95):
 #     aurc_value = aurc(detector_labels, conf)
 
 #     return fpr, tpr, thr, auroc, accuracy, aurc_value, aupr_in, aupr_out
+def compute_all_metrics(conf, detector_labels,  n_split = 0, weight_std=0, tpr_level: float = 0.95):
+    n = conf.shape[-1]
+    if n_split > 1:
+        n_samples_per_split = n // n_split
 
-def compute_all_metrics(conf, detector_labels, tpr_level: float = 0.95):
+        results_splits = []  # will store one dict per split
+
+        # Average scores over multiple validation splits
+        for m in range(n_split):
+            start_idx = m * n_samples_per_split
+            end_idx = (m + 1) * n_samples_per_split if m < n_split - 1 else n
+
+            # Slice both scores and errors on the same indices
+            scores_split = conf[:, start_idx:end_idx]      # (n_methods, n_split_samples)
+            errors_split = detector_labels[start_idx:end_idx]         # (n_split_samples,)
+
+            res_m = _compute_all_metrics(
+                conf=scores_split,
+                detector_labels=errors_split,
+            )
+            results_splits.append(res_m)
+
+        # --- Aggregate metrics across splits ---
+        results = {}
+        for key in results_splits[0].keys():
+            # Each res[key] is a list: [metric_for_run_1, ..., metric_for_run_R]
+            vals = np.stack([np.asarray(res[key]) for res in results_splits], axis=0)
+            # vals.shape = (n_split_val, n_runs_or_methods)
+            # results[key] = vals.mean(axis=0).tolist()
+            mean_vals = vals.mean(axis=0)
+            std_vals = vals.std(axis=0, ddof=1)  # sample std (or ddof=0 if you prefer)
+
+        
+            results[key] = (mean_vals + weight_std * std_vals).tolist()
+
+            # If you also want std across splits, you could store it separately:
+            # std_results[key] = vals.std(axis=0).tolist()
+    else:
+        
+        # print("score shape:", scores.shape)
+        results = _compute_all_metrics(
+        conf=conf,
+        detector_labels=detector_labels,
+    )
+        # print("fpr shape:", np.shape(fpr))
+    return results
+
+
+def _compute_all_metrics(conf, detector_labels, tpr_level: float = 0.95):
     """
     conf: np.ndarray of shape (N,) or (H, N)
     detector_labels: np.ndarray of shape (N,)
@@ -53,30 +102,50 @@ def compute_all_metrics(conf, detector_labels, tpr_level: float = 0.95):
         auroc, aupr_in, aupr_out, fpr, tpr, thr = auc_and_fpr_recall(conf, y, tpr_level)
         accuracy = float(y.mean())
         aurc_value = aurc(y, conf)
-        return fpr, tpr, thr, auroc, accuracy, aurc_value, aupr_in, aupr_out
+        results = {"fpr": fpr, "tpr": tpr, "thr": thr, "roc_auc": auroc,
+                   "accuracy": accuracy, "aurc": aurc_value,
+                   "aupr_in": aupr_in, "aupr_out": aupr_out}
+        return results
 
     # Batched case: loop over rows (H)
     H, N = conf.shape
-    fpr = np.empty(H, dtype=float)
-    tpr = np.empty(H, dtype=float)
-    thr = np.empty(H, dtype=float)
-    auroc = np.empty(H, dtype=float)
-    accuracy = np.full(H, y.mean(), dtype=float)  # same for all rows
-    aurc_value = np.empty(H, dtype=float)
-    aupr_in = np.empty(H, dtype=float)
-    aupr_out = np.empty(H, dtype=float)
+    # fpr = np.empty(H, dtype=float)
+    # tpr = np.empty(H, dtype=float)
+    # thr = np.empty(H, dtype=float)
+    # auroc = np.empty(H, dtype=float)
+    # accuracy = np.full(H, y.mean(), dtype=float)  # same for all rows
+    # aurc_value = np.empty(H, dtype=float)
+    # aupr_in = np.empty(H, dtype=float)
+    # aupr_out = np.empty(H, dtype=float)
+    # fpr = []
+    # tpr = []
+    # thr = []
+    # auroc = []
+    # accuracy = [y.mean()] * H  # same for all rows
+    # aurc_value = []
+    # aupr_in = []
+    # aupr_out = []
+    results = {metric: [] for metric in LIST_METRICS}
+    results["accuracy"] = [y.mean()] * H  # same for all rows
 
     for h in range(H):
         a, ain, aout, f, t, th = auc_and_fpr_recall(conf[h], y, tpr_level)
-        auroc[h] = a
-        aupr_in[h] = ain
-        aupr_out[h] = aout
-        fpr[h] = f
-        tpr[h] = t
-        thr[h] = th
-        aurc_value[h] = aurc(y, conf[h])
-
-    return fpr, tpr, thr, auroc, accuracy, aurc_value, aupr_in, aupr_out
+        results["fpr"].append(f)
+        results["tpr"].append(t)
+        results["thr"].append(th)
+        results["roc_auc"].append(a)
+        results["aurc"].append(aurc(y, conf[h]))
+        results["aupr_in"].append(ain)
+        results["aupr_out"].append(aout)
+            # auroc.append(a)
+            # aupr_in.append(ain)
+            # aupr_out.append(aout)
+            # fpr.append(f)
+            # tpr.append(t)
+            # thr.append(th)
+            # aurc_value.append(aurc(y, conf[h]))
+    
+    return results
 
 def rc_curve_stats(errors, conf) -> tuple[list[float], list[float], list[float]]:
         """
