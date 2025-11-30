@@ -192,6 +192,10 @@ def pretty_name(name: str) -> str:
     # key = name.strip().lower().replace(" ", "").replace("-", "")  # NOTE: no .replace("_","")
 
     table = {
+        # --- Datasets ---
+        "cifar10": "CIFAR-10",
+        "cifar100": "CIFAR-100",
+        "imagenet": "ImageNet",
         # --- Models ---
         "resnet34": "ResNet-34",
         "densenet121": "DenseNet-121",

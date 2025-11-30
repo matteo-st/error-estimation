@@ -1,4 +1,10 @@
 import os
+
+N_THREADS = 1
+os.environ["OMP_NUM_THREADS"]   = f"{N_THREADS}"
+os.environ["MKL_NUM_THREADS"]   = f"{N_THREADS}"
+os.environ["OPENBLAS_NUM_THREADS"] = f"{N_THREADS}"
+os.environ["NUMEXPR_NUM_THREADS"]  = f"{N_THREADS}"
 import json
 import torch
 
@@ -15,9 +21,9 @@ import random
 from typing import Dict, Any, List, Tuple
 import warnings
 from copy import deepcopy
-from code.utils.detection.methods import EvaluatorAblation
+from code.evaluators import HyperparamsSearch
 from code.utils.helper import make_config_list, _prepare_config_for_results, setup_seeds
-from code.utils.datasets.dataloader import prepare_dataloaders, prepare_ablation_dataloaders
+from code.utils.datasets.dataloader import prepare_ablation_dataloaders
 from code.utils.config import Config
 
 warnings.filterwarnings(
@@ -27,16 +33,18 @@ warnings.filterwarnings(
 )
 
 
-# N_THREADS = 8
+# N_THREADS = 1
 # os.environ["OMP_NUM_THREADS"]   = f"{N_THREADS}"
 # os.environ["MKL_NUM_THREADS"]   = f"{N_THREADS}"
+# os.environ["OPENBLAS_NUM_THREADS"] = f"{N_THREADS}"
+# os.environ["NUMEXPR_NUM_THREADS"]  = f"{N_THREADS}"
 
-# torch.set_num_threads(N_THREADS)
-# torch.set_num_interop_threads(N_THREADS)
+torch.set_num_threads(N_THREADS)
+torch.set_num_interop_threads(N_THREADS)
 
 # # 4. Verify settings
-# print("OMP_NUM_THREADS =", os.getenv("OMP_NUM_THREADS"))
-# print("MKL_NUM_THREADS =", os.getenv("MKL_NUM_THREADS"))
+print("OMP_NUM_THREADS =", os.getenv("OMP_NUM_THREADS"))
+print("MKL_NUM_THREADS =", os.getenv("MKL_NUM_THREADS"))
 print("torch.get_num_threads() =", torch.get_num_threads())
 print("torch.get_num_interop_threads() =", torch.get_num_interop_threads())
 
@@ -46,7 +54,7 @@ DATA_DIR = os.environ.get("DATA_DIR", "./data")
 
         
 
-def main(seed_split, n_cal1):
+def main(seed_split):
 
  
     dataset = get_dataset(
@@ -81,37 +89,55 @@ def main(seed_split, n_cal1):
 
     setup_seeds(args.seed, seed_split)
 
-    cal1_loader, test_loader = prepare_ablation_dataloaders(
+    res_loader, cal_loader, test_loader = prepare_ablation_dataloaders(
         dataset = dataset,
         seed_split=seed_split, 
-        n_cal1=n_cal1, 
+        n_res=data_cfg["n_samples"]["res"],
+        n_cal=data_cfg["n_samples"]["cal"], 
         n_test=data_cfg["n_samples"]["test"],
         batch_size_train=data_cfg["batch_size_train"], 
         batch_size_test=data_cfg["batch_size_test"], 
-        cal1_transform=data_cfg["transform"]["cal1"], 
+        cal_transform=cfg_detection["experience_args"]["transform"]["cal"], 
+        res_transform=cfg_detection["experience_args"]["transform"]["res"], 
         data_name=data_cfg["name"],
         model_name=model_cfg["model_name"],
     )
+    # print("res_loader 0", res_loader.dataset[0])
+    # print("cal_loader 0", cal_loader.dataset[0])
+    # print("test_loader 0", test_loader.dataset[0])
+    # exit()
+    # ds = cal_loader.dataset  # likely a Subset
+    # first10 = [ds[i] for i in range(10)]  # integer indexing only
+    # torch.save(first10, "test_my_inputs.pt")
+    # exit()
 
 
     latent_dir = os.path.join(args.latent_dir, f"seed-split-{seed_split}")
     latent_paths = {
-        "cal1": os.path.join(latent_dir, f"cal1_n-samples-{n_cal1}_transform-{data_cfg['transform']['cal1']}_n-epochs-{data_cfg['n_epochs']['cal1']}.pt"),
+        "res": os.path.join(latent_dir, f"res_n-samples-{data_cfg['n_samples']['res']}_transform-{cfg_detection['experience_args']['transform']['res']}_n-epochs-{cfg_detection['experience_args']['n_epochs']['res']}.pt"),
+        "cal": os.path.join(latent_dir, f"cal_n-samples-{data_cfg['n_samples']['cal']}_transform-{cfg_detection['experience_args']['transform']['cal']}_n-epochs-{cfg_detection['experience_args']['n_epochs']['cal']}.pt"),
         "test": os.path.join(latent_dir, f"test_n-samples-{data_cfg['n_samples']['test']}.pt"),
-    }
+    }   
+    root_dir = os.path.join(args.root_dir, f"seed-split-{seed_split}")
+    if args.mode == "search_res":
+        cfg_detection["experience_args"]["ratio_res_split"] = 1.0
+    
 
-    evaluator = EvaluatorAblation(
+    evaluator = HyperparamsSearch(
         model=model,
         cfg_detection=cfg_detection, 
         cfg_dataset=data_cfg,
         device=device, 
-        cal1_loader=cal1_loader, 
+        res_loader=res_loader,
+        cal_loader=cal_loader, 
         test_loader=test_loader,
-        result_folder=args.root_dir,
-        metric ="fpr",
+        result_folder=root_dir,
+        metric = args.metric,
+        quantizer_metric=args.quantizer_metric,
         latent_paths=latent_paths,
-        n_cal1=n_cal1,
         seed_split=seed_split,
+        mode=args.mode,
+        verbose=False
     )
     evaluator.run()
 
@@ -141,7 +167,7 @@ if __name__ == "__main__":
     parser.add_argument(
         '--root_dir', 
         type=str, 
-        default="./results/cifar10/",
+        default="./results/ablation/cifar10_n_cal/",
         help='Root directory to save results'
         )
     parser.add_argument(
@@ -159,8 +185,26 @@ if __name__ == "__main__":
     parser.add_argument(
         '--latent_dir', 
         type=str, 
-        default="./latent/main/cifar10/",
+        default="./latent/ablation/cifar10_n_cal/",
         help='Directory to save latent representations'
+        )
+    parser.add_argument(
+        '--metric', 
+        type=str, 
+        default="fpr",
+        help='Metric to use for hyperparams selection'
+        )
+    parser.add_argument(
+        '--quantizer_metric', 
+        type=str, 
+        default="same",
+        help='Metric to use for quantizer selection'
+        )
+    parser.add_argument(
+        '--mode', 
+        type=str, 
+        default="search",
+        help='Mode to use (search or evaluation)'
         )
     args = parser.parse_args()
 
@@ -174,9 +218,13 @@ if __name__ == "__main__":
     # n_cal1 = data_cfg["n_samples"]["cal1"][-1]
     # print(data_cfg["seed_split"])
     # print(data_cfg["n_samples"]["cal1"])
-    for seed_split, n_cal1 in product(data_cfg["seed_split"], data_cfg["n_samples"]["cal1"]):
-        print(f"seed_split: {seed_split}, n_cal1: {n_cal1}")
-        main(seed_split, n_cal1)
+    # for seed_split, n_cal in product(data_cfg["seed_split"], data_cfg["n_samples"]["cal"]):
+    #     print(f"seed_split: {seed_split}, n_cal: {n_cal}")
+    #     main(seed_split, n_cal)
+    for seed_split in data_cfg["seed_split"]:
+        print(f"seed_split: {seed_split}")
+        main(seed_split)
+   
 
 
 

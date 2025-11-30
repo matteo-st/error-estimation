@@ -1,10 +1,18 @@
 #
+# from turtle import pd
 from typing import Any, Optional, Tuple, Union
 from warnings import warn
-
+import numpy as np
+import tqdm
 import torch
 import torch.nn as nn
 from torch import LongTensor, Tensor
+from code.utils.clustering.utils import plot_means_covs_trajectory_per_cluster, read_probits, get_clusters_info, plot_eval, plot_cluster_sizes, plot_num_samples_per_cluster, plot_metric_corr
+import pandas as pd
+from code.utils.metrics import compute_all_metrics
+import matplotlib.pyplot as plt
+import os
+
 
 from .distances import (
     BaseDistance,
@@ -40,8 +48,8 @@ class KMeans(nn.Module):
             num_init: Number of different initial starting configurations,
                         i.e. different sets of initial centers (default: 8).
             max_iter: Maximum number of iterations (default: 100).
-            distance: batched distance evaluator (default: LpDistance).
-            p_norm: norm for lp distance (default: 2).
+        
+      
             tol: Relative tolerance with regards to Frobenius norm of the difference
                         in the cluster centers of two consecutive iterations to
                         declare convergence. (default: 1e-4)
@@ -56,7 +64,7 @@ class KMeans(nn.Module):
             **kwargs: additional key word arguments for the distance function.
     """
 
-    INIT_METHODS = ["random", "k-means++", "kmeans"]
+    INIT_METHODS = ["random", "k-means++", "kmeans", "supervised"]
     NORM_METHODS = ["mean", "minmax", "unit"]
 
     def __init__(
@@ -65,11 +73,20 @@ class KMeans(nn.Module):
         num_init: int = 8,
         max_iter: int = 300,
         tol: float = 1e-8,
-        normalize: Optional[Union[str, bool]] = None,
         n_clusters: Optional[int] = 8,
         verbose: bool = True,
         seed: Optional[int] = 123,
         is_for_init=False,
+        res_errors=None,
+        val_errors=None,
+        val_probits=None,
+        cal_probits=None,
+        cal_errors=None,
+        test_probits=None,
+        test_errors=None,
+        bound="bernstein",
+        device=torch.device("cpu"),
+        collect_info: bool = True,
         **kwargs,
     ):
         super(KMeans, self).__init__()
@@ -77,9 +94,10 @@ class KMeans(nn.Module):
         self.num_init = num_init
         self.max_iter = max_iter
         self.tol = tol
-        self.normalize = normalize
+        # self.normalize = normalize
         self.n_clusters = n_clusters
         self.verbose = verbose
+        self.device = device
         self.seed = seed
 
         self._check_params()
@@ -87,14 +105,28 @@ class KMeans(nn.Module):
 
         self.eps = None
         self._k_max = None
-        self._result = None
+        self.results = None
         self.n_iter = None  # number of iterations run in last fit
+        
+        self.res_errors = res_errors
+        self.val_errors = val_errors
+        self.val_probits = val_probits
+        self.cal_probits = cal_probits
+        self.cal_errors = cal_errors
+        self.test_probits = test_probits
+        self.test_errors = test_errors
+        self.bound = bound
+
+        self.collect_info = collect_info
+
+        self._init_info()
+
 
 
     @property
     def is_fitted(self) -> bool:
         """True if model was already fitted."""
-        return self._result is not None
+        return self.results is not None
 
     @property
     def num_clusters(self) -> Union[int, Tensor, Any]:
@@ -105,7 +137,7 @@ class KMeans(nn.Module):
         """
         if not self.is_fitted:
             return None
-        return self._result.k
+        return self.results.k
 
     def _check_params(self):
         if self.init_method not in self.INIT_METHODS:
@@ -118,18 +150,18 @@ class KMeans(nn.Module):
         if self.max_iter <= 0:
             raise ValueError(f"max_iter should be > 0, but got {self.max_iter}.")
       
-        if self.tol < 0 or self.tol > 1:
-            raise ValueError(f"tol should be > 0 and < 1, but got {self.tol}.")
-        if isinstance(self.normalize, bool):
-            if self.normalize:
-                self.normalize = "mean"
-            else:
-                self.normalize = None
-        if self.normalize is not None and self.normalize not in self.NORM_METHODS:
-            raise ValueError(
-                f"unknown <normalize> method: {self.normalize}. "
-                f"Please choose one of {self.NORM_METHODS}"
-            )
+        # if self.tol < 0 or self.tol > 1:
+        #     raise ValueError(f"tol should be > 0 and < 1, but got {self.tol}.")
+        # # if isinstance(self.normalize, bool):
+        # #     if self.normalize:
+        # #         self.normalize = "mean"
+        # #     else:
+        # #         self.normalize = None
+        # if self.normalize is not None and self.normalize not in self.NORM_METHODS:
+        #     raise ValueError(
+        #         f"unknown <normalize> method: {self.normalize}. "
+        #         f"Please choose one of {self.NORM_METHODS}"
+        #     )
         if self.n_clusters is not None and self.n_clusters < 2:
             raise ValueError(f"n_clusters should be > 1, but got {self.n_clusters}.")
 
@@ -162,8 +194,11 @@ class KMeans(nn.Module):
                         "did not specify default 'n_clusters' at initialization."
                     )
                 k = self.n_clusters
+
             if isinstance(k, int):  # convert to tensor
-                k = torch.tensor(k, dtype=torch.long)
+                k = torch.tensor([k], dtype=torch.long)
+                # print("k is int")
+                # print('k shape:', k.shape)
             else:
                 raise TypeError(
                     f"k has to be int, torch.Tensor or None " f"but got {type(k)}."
@@ -176,7 +211,7 @@ class KMeans(nn.Module):
         if (k >= self.n).any():
             raise ValueError(
                 f"Specified 'k' must be smaller than "
-                f"number of samples n={n}, but got: {k}."
+                f"number of samples n={self.n}, but got: {k}."
             )
         if (k <= 1).any():
             raise ValueError("Clustering for k=1 is ambiguous.")
@@ -262,12 +297,13 @@ class KMeans(nn.Module):
         x = self._check_x(x)
         self.n, self.d = x.shape
         x_ = x
-        self.bs = k.shape[0]
+        
         k = self._check_k(k,  device=x.device)
+        self.bs = k.shape[0]
 
         # normalize input
-        if self.normalize is not None:
-            x = self._normalize(x, self.normalize, self.eps)
+        # if self.normalize is not None:
+        #     x = self._normalize(x, self.normalize, self.eps)
         # init centers
         if centers is None:
             centers = self._center_init(x, k, **kwargs)
@@ -276,15 +312,10 @@ class KMeans(nn.Module):
         )
 
         if not self.is_for_init:
-            labels, new_centers, inertia = self._cluster(
+            self._cluster(
                 x, centers, k, **kwargs
             )
-            return ClusterResult(
-                labels=labels.cpu(),  # type: ignore
-                centers=new_centers.cpu(),
-                inertia=inertia.cpu(),
-                k=k,
-            )
+      
         else:
             centers = self._cluster(
                 x, centers, k, **kwargs
@@ -310,7 +341,7 @@ class KMeans(nn.Module):
         Returns:
             KMeans model
         """
-        self._result = self(x, k=k, centers=centers, **kwargs)
+        self(x, k=k, centers=centers, **kwargs)
 
     
     @torch.no_grad()
@@ -318,19 +349,20 @@ class KMeans(nn.Module):
         """Hard assignments (argmax over responsibilities)."""
         assert self.is_fitted, "Call fit() first."
         x = self._check_x(x)  # (bs, n, d)
-        if self.normalize is not None:
-            x = self._normalize(x, self.normalize, self.eps)
+        # if self.normalize is not None:
+        #     x = self._normalize(x, self.normalize, self.eps)
 
         # Fitted params (one set per batch)
-        centers    = self._result.centers        # (bs, k_max, d)
-        k_vec    = self._result.k            # (bs,)
+        x   = x.to(self.device)                            # (bs, n, d)
+        centers    = self.results.centers.to(self.device)        # (bs, k_max, d)
+        k_vec    = self.results.k.to(self.device)            # (bs,)
 
         n, d = x.shape
         bs, k_max, d2 = centers.shape
         assert  d == d2
 
         # Build invalid-component mask from k (don’t rely on any saved mask)
-        k_range = torch.arange(k_max, device=x.device).expand(bs, -1)    # (bs, k_max)
+        k_range = torch.arange(k_max, device=self.device).expand(bs, -1)    # (bs, k_max)
         invalid = (k_range >= k_vec.unsqueeze(1)).unsqueeze(1)  
 
         labels = self._e_step(
@@ -377,8 +409,8 @@ class KMeans(nn.Module):
             batch tensor of cluster labels for each sample (BS, N)
 
         """
-        self._result = self(x, k=k, centers=centers, **kwargs)
-        return self._result.labels
+        self(x, k=k, centers=centers, **kwargs)
+        return self.results.labels.to(self.device)
 
     @torch.no_grad()
     def _center_init(self, x: Tensor, k: LongTensor, **kwargs) -> Tensor:
@@ -388,32 +420,34 @@ class KMeans(nn.Module):
             return self._init_rnd(x, k)
         elif self.init_method == "k-means++":
             return self._init_plus(x, k)
+        elif self.init_method == "supervised":
+            return self._init_supervised(x, k)
         else:
             raise ValueError(f"unknown initialization method: {self.init_method}.")
 
-    @staticmethod
-    def _normalize(x: Tensor, normalize: str, eps: float = 1e-8):
-        """Normalize input samples x according to specified method:
+    # @staticmethod
+    # def _normalize(x: Tensor, normalize: str, eps: float = 1e-8):
+    #     """Normalize input samples x according to specified method:
 
-        - mean: subtract sample mean
-        - minmax: min-max normalization subtracting sample min and divide by sample max
-        - unit: normalize x to lie on D-dimensional unit sphere
+    #     - mean: subtract sample mean
+    #     - minmax: min-max normalization subtracting sample min and divide by sample max
+    #     - unit: normalize x to lie on D-dimensional unit sphere
 
-        """
-        if normalize == "mean":
-            x -= x.mean(dim=1)[:, None, :]
-        elif normalize == "minmax":
-            x -= x.min(-1, keepdims=True).values  # type: ignore
-            x /= x.max(-1, keepdims=True).values  # type: ignore
-        elif normalize == "unit":
-            # normalize x to unit sphere
-            z_msk = x == 0
-            x = x.clone()
-            x[z_msk] = eps
-            x = torch.diag_embed(1.0 / (torch.norm(x, p=2, dim=-1))) @ x
-        else:
-            raise ValueError(f"unknown normalization type {normalize}.")
-        return x
+    #     """
+    #     if normalize == "mean":
+    #         x -= x.mean(dim=1)[:, None, :]
+    #     elif normalize == "minmax":
+    #         x -= x.min(-1, keepdims=True).values  # type: ignore
+    #         x /= x.max(-1, keepdims=True).values  # type: ignore
+    #     elif normalize == "unit":
+    #         # normalize x to unit sphere
+    #         z_msk = x == 0
+    #         x = x.clone()
+    #         x[z_msk] = eps
+    #         x = torch.diag_embed(1.0 / (torch.norm(x, p=2, dim=-1))) @ x
+    #     else:
+    #         raise ValueError(f"unknown normalization type {normalize}.")
+    #     return x
 
     def _init_rnd(self, x: torch.Tensor, k: torch.LongTensor) -> torch.Tensor:
         """
@@ -446,102 +480,46 @@ class KMeans(nn.Module):
         centers = base_centers.unsqueeze(0).repeat(bs, 1, 1, 1).contiguous()  # (bs, num_init, k_max, D)
 
         return centers
+    def _init_supervised(self, x, k):
 
-    def _init_skl_plus(self, x: Tensor, k: LongTensor) -> Tensor:
-        """Choose initial centers via kmeans++ method.
-        https://github.com/scikit-learn/scikit-learn/blob/2beed55847ee70d363bdbfe14ee4401438fba057/sklearn/cluster/_kmeans.py#L50
 
-        Args:
-            x: (BS, N, D)
-            k: (BS, )
+        if self.seed is not None:
+            gen = torch.Generator(device=x.device)
+            gen.manual_seed(self.seed)
+        else:
+            gen = None
+        
+        mean_error_res =  self.res_errors.float().mean()
+        n_cluster_err = int(k[0].item() * mean_error_res)
+        if n_cluster_err == 0:
+            n_cluster_err = 1
+        n_cluster_noerr = int(k[0].item() - n_cluster_err)
+        n_clusters_dic = {'err': n_cluster_err, 'noerr': n_cluster_noerr}
 
-        Returns:
-            centers: (BS, num_init, k, D)
+        n_errors = int(self.res_errors.sum().item())
+        n_noerrors = int(self.res_errors.shape[0] - n_errors)
+        n_samples_dic = {'err': n_errors, 'noerr': n_noerrors}
+        x_dic = {'err': x[self.res_errors==1], 'noerr': x[self.res_errors==0]}
+        base_centers = []
+        for err_type in n_clusters_dic.keys():
+            n = n_samples_dic[err_type]
+            k = n_clusters_dic[err_type]
+            # print("k for", err_type, ":", k)
 
-        """
-        raise NotImplementedError
-        # would require sklearn as additional dependency
+            probs = torch.full((self.num_init, n), 1.0 / n, device=x.device, dtype=x.dtype)
+            idx   = torch.multinomial(probs, num_samples=k, replacement=False, generator=gen)  # (num_init, k_max), Long
+            centers = x_dic[err_type].index_select(0, idx.reshape(-1)).view(self.num_init, k, self.d).contiguous()
+           # print("shape of centers:", centers.size())
+            base_centers.append(centers)
+        base_centers = torch.cat(base_centers, dim=1).unsqueeze(0).repeat(self.bs, 1, 1, 1).contiguous()
+        return base_centers
 
-        # bs, n, d = x.size()
-        # k_max = torch.max(k).cpu().item()
-        # rs = np.random.RandomState(self.seed if self.seed is not None else 1)
-        # device = x.device
-        # x = x.cpu().numpy()
-        # k = k.cpu().numpy()
-        # centers = []
-        # for smp, nc in zip(x, k):
-        #     center_inits = []
-        #     x_squared_norms = row_norms(smp, squared=True)
-        #     for i in range(self.num_init):
-        #         c = np.zeros((k_max, d))
-        #         c_init, _ = _kmeans_plusplus(
-        #             smp, nc, random_state=rs, x_squared_norms=x_squared_norms
-        #         )
-        #         c[:nc] = c_init
-        #         center_inits.append(c)
-        #     centers.append(torch.from_numpy(np.stack(center_inits)))
-        #
-        # return torch.stack(centers).to(device)
+            
+        
 
-    # def _init_plus(self, x: Tensor, k: LongTensor) -> Tensor:
-    #     """Choose initial centers via k-means++ method
+        
 
-    #     Args:
-    #         x: (BS, N, D)
-    #         k: (BS, )
-
-    #     Returns:
-    #         centers: (BS, num_init, k, D)
-
-    #     """
-    #     n, d = x.size()
-    #     bs, = k.shape
-    #     k_max = torch.max(k).cpu().item()
-
-    #     if self.seed is not None:
-    #         # make random init reproducible independent of current iteration,
-    #         # which otherwise would step and change the torch generator state
-    #         gen = torch.Generator(device=x.device)
-    #         gen.manual_seed(self.seed)
-    #     else:
-    #         gen = None
-
-    #     bsm = bs * self.num_init
-    #     bsm_idx = torch.arange(bsm, device=x.device)
-    #     centers = torch.empty((bsm, k_max, d), dtype=x.dtype, device=x.device)
-
-    #     # select first center randomly
-    #     assert n > self.num_init, (
-    #         f"Number of samples must be larger than <num_init> "
-    #         f"but got {n} <= {self.num_init}"
-    #     )
-    #     idx = torch.multinomial(
-    #         torch.empty((bs, n), device=x.device, dtype=x.dtype).fill_(1 / n),
-    #         num_samples=self.num_init,
-    #         replacement=False,
-    #         generator=gen,
-    #     )
-    #     centers[:, 0] = x.gather(index=idx[:, :, None].expand(-1, -1, d), dim=1).view(
-    #         -1, d
-    #     )
-    #     msk = torch.zeros((bsm, n, k_max), dtype=torch.bool, device=x.device)
-    #     msk[bsm_idx, idx.view(-1), 0] = True
-
-    #     # select the remaining k-1 centers
-    #     for nc in range(1, k_max):
-    #         dist = self._pairwise_distance(
-    #             x, centers[:, :nc].view(bs, self.num_init, -1, d)
-    #         ).view(bsm, n, nc)
-    #         pot = dist**2
-    #         pot[msk[:, :, :nc]] = 0
-    #         pot = pot.min(dim=-1).values
-    #         idx = torch.multinomial(pot, 1, generator=gen).view(bs, self.num_init)
-    #         centers[:, nc] = x.gather(
-    #             index=idx[:, :, None].expand(-1, -1, d), dim=1
-    #         ).view(-1, d)
-    #         msk[bsm_idx, idx.view(-1), nc] = True
-
-    #     return centers.view(bs, self.num_init, k_max, d)
+    
     @torch.no_grad()
     def _init_plus(self, x: torch.Tensor, k: torch.LongTensor) -> torch.Tensor:
         """
@@ -623,6 +601,81 @@ class KMeans(nn.Module):
 
         return means
 
+    def _init_info(self):
+        """Record additional info before clustering."""
+
+        self.best_init = None
+        self.inertia_history = torch.empty((self.num_init, self.max_iter), device='cpu')
+        self.classif_results = {split: [[] for _ in range(self.num_init)] for split in ['res', 'cal', 'test']}
+        self.classif_results_upper_res = {split: [[] for _ in range(self.num_init)] for split in ['res', 'val', 'test']}
+        self.params_history = {"weights": []}
+        self.obj_history = torch.empty((self.num_init, self.max_iter), device='cpu')
+        self.list_clusters_res = []
+
+    def _record_info(self, x, centers, invalid, k, iter):
+        """Record additional info after clustering."""
+        
+
+        clusters_res = self._e_step(x, centers, invalid=invalid)
+        clusters_cal = self._e_step(self.cal_probits, centers, invalid=invalid)
+        clusters_test = self._e_step(self.test_probits, centers, invalid=invalid)
+        clusters_val = self._e_step(self.val_probits, centers, invalid=invalid)
+
+        clusters_dic = {"res": clusters_res,  "val": clusters_val, "cal": clusters_cal, "test": clusters_test}
+        errors_dic = {"res": self.res_errors, "val": self.val_errors, "cal": self.cal_errors, "test": self.test_errors}
+    
+
+        _, upper = get_clusters_info(self.cal_errors, clusters_cal.squeeze(0), k, bound=self.bound)
+        _, upper_res = get_clusters_info(self.res_errors, clusters_res.squeeze(0), k, bound=self.bound)
+        
+        for split in ["res", "val", "test"]:
+            clusters = clusters_dic[split].squeeze(0)
+            errors = errors_dic[split]
+     
+            scores =  upper_res.gather(1, clusters)
+        
+            for n_init in range(self.num_init):
+                
+                results = compute_all_metrics(
+                    conf=scores[n_init].cpu(),
+                    detector_labels=errors.cpu(),
+                )
+                results = pd.DataFrame([results])
+
+            
+                    
+                self.classif_results_upper_res[split][n_init].append(results)
+
+        
+
+        for split in ["res", "cal", "test"]:
+            clusters = clusters_dic[split].squeeze(0)
+            errors = errors_dic[split]
+     
+            scores =  upper.gather(1, clusters)
+        
+            for n_init in range(self.num_init):
+                
+                results = compute_all_metrics(
+                    conf=scores[n_init].cpu(),
+                    detector_labels=errors.cpu(),
+                )
+                results = pd.DataFrame([results])
+
+            
+                    
+                self.classif_results[split][n_init].append(results)
+
+
+
+        self.list_clusters_res.append(clusters_res.detach().cpu().clone().squeeze(0))
+        self.params_history["weights"].append(centers.detach().cpu().clone())
+        inertia = self._calculate_inertia(x, centers, clusters_res)
+        self.inertia_history[:, iter] = inertia.squeeze(0).cpu()
+            
+
+        
+
     @torch.no_grad()
     def _cluster(
         self, x: Tensor, centers: Tensor, k: LongTensor, **kwargs
@@ -651,7 +704,7 @@ class KMeans(nn.Module):
         invalid = (k_max_range >= k[:, None])[:, None, :].expand(bs, self.num_init, k_max)  # (bs,m,k)
   
 
-        for i in range(self.max_iter):
+        for i in tqdm.tqdm(range(self.max_iter), desc="KMeans clustering"):
             # print("centers size:", centers.size())
             # centers[k_mask] = float("inf")
             # print("centers size:", centers.size())
@@ -661,6 +714,11 @@ class KMeans(nn.Module):
             # update cluster centers
             # print("labels shape:", c_assign.size())
             centers = self._m_step(x, c_assign, k_max)
+
+            if self.collect_info:
+                self._record_info(x, centers, invalid=invalid, k=k, iter=i)
+
+
             if self.tol is not None:
                 # calculate center shift
                 shift = self._calculate_shift(centers, old_centers, p=2)
@@ -686,67 +744,26 @@ class KMeans(nn.Module):
         else:
 
             inertia = self._calculate_inertia(x, centers, c_assign)
-            best_init = torch.argmin(inertia, dim=-1)
-            b_idx = torch.arange(bs, device=x.device)
+            # best_init = torch.argmin(inertia, dim=-1)
+            # b_idx = torch.arange(bs, device=x.device)
+            self.results = ClusterResult(
+                centers=centers.squeeze(0).cpu(),
+                labels=c_assign.squeeze(0).cpu(),
+                inertia=inertia.squeeze(0).cpu(),
+                k=k,
+                )
 
-            return (
-                c_assign[b_idx, best_init],
-                centers[b_idx, best_init],
-                inertia[b_idx, best_init],
-            )
+            # return (
+            #     c_assign[b_idx, best_init],
+            #     centers[b_idx, best_init],
+            #     inertia[b_idx, best_init],
+            # )
 
     def storage_bytes(t): 
         GIB = 1024 ** 3
         return t.untyped_storage().nbytes() / GIB
     
-    # def _pairwise_distance(
-    #     self,
-    #     x: torch.Tensor,              # (bs, n, d)
-    #     centers: torch.Tensor,        # (bs, num_init, k, d)
-    #     *,
-    #     squared: bool = False,        # keep squared distances to avoid sqrt cost
-    #     chunk_n: int | None = None,   # e.g., 8192 to bound (bs*m*chunk*k)
-    # ) -> torch.Tensor:
-    #     """
-    #     Returns L2 distances of shape (bs, num_init, n, k) without copying x.
-    #     Uses 4D batched matmul: (bs, m, n, d) @ (bs, m, d, k) -> (bs, m, n, k).
-    #     No expand+reshape(...).contiguous() on x; only a small contiguous() on the
-    #     transposed centers for fast GEMM.
-    #     """
-    #     bs, n, d = x.shape
-    #     bs2, m, k, d2 = centers.shape
-    #     assert bs == bs2 and d == d2
-
-    #     # Broadcast x along num_init as a VIEW (no data copy).
-    #     X = x[:, None, :, :].expand(bs, m, n, d)              # (bs, m, n, d) view
-
-    #     # Prepare centers^T as contiguous for matmul (this is much smaller than x replicated m times).
-    #     Kt = centers.transpose(-1, -2).contiguous()           # (bs, m, d, k)
-
-    #     # Precompute squared norms (kept small; no (n,k,d) tensor is formed).
-    #     C2 = (centers * centers).sum(dim=-1).unsqueeze(-2)    # (bs, m, 1, k)
-
-    #     if chunk_n is None or chunk_n >= n:
-    #         # One shot
-    #         X2 = (X * X).sum(dim=-1, keepdim=True)            # (bs, m, n, 1)
-    #         XC = X @ Kt                                       # (bs, m, n, k)
-    #         dist2 = X2 + C2 - 2.0 * XC                        # (bs, m, n, k)
-    #     else:
-    #         # Chunk along samples to bound peak memory to O(bs*m*chunk_n*k)
-    #         out = X.new_empty(bs, m, n, k)
-    #         for s in range(0, n, chunk_n):
-    #             e = min(s + chunk_n, n)
-    #             Xs = X[:, :, s:e, :]                          # (bs, m, b, d) view
-    #             X2s = (Xs * Xs).sum(dim=-1, keepdim=True)     # (bs, m, b, 1)
-    #             XCs = Xs @ Kt                                 # (bs, m, b, k)
-    #             out[:, :, s:e, :] = X2s + C2 - 2.0 * XCs
-    #         dist2 = out
-
-    #     dist2.clamp_(min=0.0)
-    #     if squared:
-    #         return dist2
-    #     else:
-    #         return dist2.sqrt_()
+   
 
     def _pairwise_distance(self, x: Tensor, centers: Tensor, **kwargs):
         def storage_bytes(t): 
@@ -859,3 +876,367 @@ class KMeans(nn.Module):
             f"normalize: {self.normalize}"
             f")"
         )
+
+
+
+
+if __name__ == "__main__":
+
+    gpu_id = 0
+    device = torch.device(f'cuda:{gpu_id}' if torch.cuda.is_available() else 'cpu')
+
+    seed = 2
+    cov_type = "diag"
+    n_clusters = 92
+    order = True
+    init_scheme = "k-means++"  # random, k-means++, kmeans
+    bound = "bernstein"
+    max_iter = 300
+    num_init = 20
+ 
+    
+    model_name = "timm-vit-tiny16" #timm-vit-tiny16
+    data_name = "imagenet"
+    n_res = 10000
+    n_cal = 15000
+    n_test = 25000
+    seed_split = 9
+    subclasses = None#  [5, 8] # [5, 4, 6, 8]  # [5, 8]
+    temperature = 6.9
+
+    suffix = ""
+
+    # Real probits
+    # latent_path = f"./latent/ablation/{data_name}_{model_name}_n_cal_with-res-{n_res}/seed-split-{seed_split}/res_n-samples-{n_res}_transform-test_n-epochs-1.pt"
+    latent_path = f"./latent/{data_name}_{model_name}/seed-split-{seed_split}/res_n-samples-{n_res}_transform-test_n-epochs-1.pt"
+    probits, errors = read_probits(latent_path, order=order, subclasses=subclasses, temperature=temperature)
+    latent_path_cal = f"./latent/{data_name}_{model_name}/seed-split-{seed_split}/cal_n-samples-{n_cal}_transform-test_n-epochs-1.pt"
+    cal_probits, cal_errors = read_probits(latent_path_cal, order=order, subclasses=subclasses, temperature=temperature)
+    latent_path_test = f"./latent/{data_name}_{model_name}/seed-split-{seed_split}/test_n-samples-{n_test}.pt"
+    test_probits, test_errors = read_probits(latent_path_test, order=order, subclasses=subclasses, temperature=temperature)
+    print("Number of res samples:", probits.size(0))
+    print("Number of cal samples:", cal_probits.size(0))
+    print("Number of test samples:", test_probits.size(0))
+    # print("Shape probits:", probits.size())
+    # exit()
+
+    probits = probits.to(device)
+    errors = errors.to(device)
+    test_probits = test_probits.to(device)
+    test_errors = test_errors.to(device)
+    cal_probits = cal_probits.to(device)
+    cal_errors = cal_errors.to(device)
+
+    n_tr = int(0.98 * n_res)
+    tr_idx = np.arange(n_tr)
+    va_idx = np.arange(n_tr, n_res)
+    probits_res_tr = probits[tr_idx]
+    errors_res_tr = errors[tr_idx]
+    probits_res_va = probits[va_idx]
+    errors_res_va = errors[va_idx]
+    # print(errors)
+
+    # save_folder  = f"./code/utils/clustering/{data_name}_{model_name}_seed-split-{seed_split}_n-{n_samples}_iter-{max_iter}_lr-{lr}_lr_min-{lr_min}_K-{n_clusters}_with_logdet_fix_cov-{sig}/seed_{seed}/"
+   # save_folder  = f"./code/utils/clustering/soft_kmeans_results/{data_name}_{model_name}_seed-split-{seed_split}_n-{n_res}_K-{n_clusters}_bound-{bound}_init-{init_scheme}/seed_{seed}/"
+    if subclasses is not None:
+        subclasses_str = "-".join([str(c) for c in subclasses])
+        save_folder  = f"./code/utils/clustering/kmeans_results/subclass-{subclasses_str}"
+    else:
+        save_folder  = f"./code/utils/clustering/kmeans_results"
+    file =f"{data_name}_{model_name}_seed-split-{seed_split}/n-{n_res}_iter-{max_iter}_K-{n_clusters}_bound-{bound}_init-{init_scheme}_numinit-{num_init}"
+    if temperature != 2:
+        file += f"_temp-{temperature}"
+    save_folder  = os.path.join(save_folder, file, f"seed_{seed}")
+    # save_folder  = f"./code/utils/clustering/toy_example_with_logdet_campled_min-{var_min}_cov/seed_{seed}/"
+    os.makedirs(save_folder, exist_ok=True)
+    print("save filer:", save_folder)
+
+   
+
+    quantizer = KMeans(
+                seed=seed,
+                init_method=init_scheme,
+                max_iter = max_iter, 
+                num_init=num_init, 
+                verbose=0, 
+                cal_errors=cal_errors,
+                cal_probits=cal_probits,
+                test_errors=test_errors,
+                test_probits=test_probits,
+                res_errors=errors_res_tr,
+                val_probits=probits_res_va,
+                val_errors=errors_res_va,
+                bound=bound,
+                tol=None,
+                device=device,
+            
+            )
+    clusters_res_tr = quantizer.fit_predict(
+        probits_res_tr,
+        k=n_clusters).squeeze(0)
+
+
+    # if True:
+    #     torch.save(quantizer.results, os.path.join(save_folder, f"results{suffix}.pt"))
+
+    ################################################################################
+
+    k = torch.tensor(n_clusters, device=device)
+    clusters_res_val = quantizer.predict(probits_res_va).squeeze(0)
+    clusters_cal = quantizer.predict(cal_probits).squeeze(0)
+    clusters_test = quantizer.predict(test_probits).squeeze(0)
+    clusters_dic = {"res_tr": clusters_res_tr, "res_val": clusters_res_val, "cal": clusters_cal, "test": clusters_test}
+    errors_dic = {"res_tr": errors_res_tr, "res_val": errors_res_va, "cal": cal_errors, "test": test_errors}
+
+    
+    _, upper_res_tr = get_clusters_info(errors_res_tr, clusters_res_tr, k, bound=bound)
+    _, upper_res_val = get_clusters_info(errors_res_va, clusters_res_val, k, bound=bound)
+
+    _, upper_cal = get_clusters_info(cal_errors, clusters_cal, k, bound=bound)
+    
+    upper_dic = {"res_tr": upper_res_tr, "cal": upper_cal,  "res_val": upper_res_val}
+    
+
+    classif_results = {split: {upper_type: None for upper_type in upper_dic.keys()} for split in ['res_tr', 'res_val', 'cal', 'test']}
+
+    for split in ["res_tr", "res_val", "cal", "test"]:
+        for upper_type, upper in upper_dic.items():
+            # print(f"Processing split: {split}, upper_type: {upper_type}")
+            clusters = clusters_dic[split].to(device)
+            errors = errors_dic[split]
+            
+            scores =  upper.gather(1, clusters)
+        
+           
+            # print("score shape:", scores.shape)
+            results = compute_all_metrics(
+            conf=scores.cpu(),
+            detector_labels=errors.cpu(),
+        )
+            # print("fpr shape:", np.shape(fpr))
+
+            results = pd.DataFrame([results])
+       
+            
+            classif_results[split][upper_type] = results
+
+    print("MEan Test FPR:", np.mean(classif_results["test"]["cal"]["fpr"]))
+
+    # Plot res_va vs test results
+  
+    for metric in ["fpr", "roc_auc", "aurc", "aupr_err", "aupr_success"]:
+
+
+        plot_metric_corr(classif_results, upper_types=["res_tr", "cal"], splits=["res_val", "test"], metric=metric, save_folder=save_folder, suffix=suffix)
+        
+        plot_metric_corr(classif_results, upper_types=["res_tr", "res_tr"], splits=["cal", "test"], metric=metric, save_folder=save_folder, suffix=suffix)
+        
+        plot_metric_corr(classif_results, upper_types=["res_val", "cal"], splits=["res_tr", "test"], metric=metric, save_folder=save_folder, suffix=suffix)
+        
+
+    # print("quantizer.classif_results['res'][n_init],", quantizer.classif_results["res"][0])
+    for n_init in [0]:
+        quantizer.classif_results["res"][n_init] = pd.concat(quantizer.classif_results["res"][n_init], ignore_index=True)
+        quantizer.classif_results["cal"][n_init] = pd.concat(quantizer.classif_results["cal"][n_init], ignore_index=True)
+        quantizer.classif_results["test"][n_init] = pd.concat(quantizer.classif_results["test"][n_init], ignore_index=True)
+        plot_eval(
+            results_test=quantizer.classif_results["test"][n_init],
+            results_cal=quantizer.classif_results["cal"][n_init],
+            results_res=quantizer.classif_results["res"][n_init],
+            metric="fpr",
+            save_folder=save_folder,
+            suffix= f"_init-{n_init}" + suffix,
+        )
+
+        # PLot Inertia
+        plt.figure()
+        for n_init in range(quantizer.num_init):
+            plt.plot(quantizer.inertia_history[n_init], label=f"init {n_init}")
+        plt.legend()    
+        plt.xlabel("Iteration")
+        plt.ylabel("Inertia")
+        plt.title("KMeans Inertia over Iterations")
+        plt.grid()
+        plt.savefig(os.path.join(save_folder, f"inertia_history_{suffix}.png"))
+        plt.close()
+   
+
+
+
+    # # clusters: 1D LongTensor of shape (N,), possibly on GPU
+    # # Ensure we have a bin for every cluster id up to max()
+    means = get_clusters_info(errors_res_tr, clusters_res_tr[0], torch.tensor([n_clusters], device=device), bound=bound)[0].squeeze(0)
+    # print('clusters shape', clusters.shape)
+    # print('means shape', means.shape)
+    plot_cluster_sizes(clusters_res_tr[0], save_folder, suffix=suffix, error_means=means, sort=False)
+
+    # cal_clusters = quantizer.predict(cal_probits).squeeze(0).to(torch.long)
+    # print("cal clusters shape:", cal_clusters.shape)
+    # means_cal = get_clusters_info(cal_errors, cal_clusters, torch.tensor([n_clusters], device=device), bound=bound)[0].squeeze(0)
+    # plot_cluster_sizes(
+    #     cal_clusters, save_folder, suffix=suffix, error_means=means_cal, split_name="cal",
+    #     sort=False)
+
+    # test_clusters = quantizer.predict(test_probits).squeeze(0).to(torch.long)
+    # means_test = get_clusters_info(test_errors, test_clusters, torch.tensor([n_clusters], device=device), bound=bound)[0].squeeze(0)
+    # plot_cluster_sizes(
+    #     test_clusters, save_folder, suffix=suffix, error_means=means_test, split_name="test",
+    #     sort=False)
+
+    # for n_init in range(quantizer.num_init):
+    #     quantizer.classif_results["res"][n_init] = pd.concat(quantizer.classif_results["res"][n_init], ignore_index=True)
+    #     quantizer.classif_results["cal"][n_init] = pd.concat(quantizer.classif_results["cal"][n_init], ignore_index=True)
+    #     quantizer.classif_results["test"][n_init] = pd.concat(quantizer.classif_results["test"][n_init], ignore_index=True)
+    #     plot_eval(
+    #         results_test=quantizer.classif_results["test"][n_init],
+    #         results_cal=quantizer.classif_results["cal"][n_init],
+    #         results_res=quantizer.classif_results["res"][n_init],
+    #         metric="fpr",
+    #         save_folder=save_folder,
+    #         suffix= f"_init-{n_init}" + suffix,
+    #     )
+
+    #     # PLot Inertia
+    #     plt.figure()
+    #     for n_init in range(quantizer.num_init):
+    #         plt.plot(quantizer.inertia_history[n_init], label=f"init {n_init}")
+    #     plt.legend()    
+    #     plt.xlabel("Iteration")
+    #     plt.ylabel("Inertia")
+    #     plt.title("KMeans Inertia over Iterations")
+    #     plt.grid()
+    #     plt.savefig(os.path.join(save_folder, f"inertia_history_{suffix}.png"))
+    #     plt.close()
+
+    # # Compute perason Correlation betweeen inertia and fpr
+    # metric_value = [quantizer.classif_results["test"][n_init]["fpr"].values[-1] for n_init in range(quantizer.num_init)]
+    # inertia_value = [quantizer.inertia_history[n_init, -1].item() for n_init in range(quantizer.num_init)]
+    # pearson_corr = np.corrcoef(metric_value, inertia_value)[0, 1]
+    # print(f"Pearson correlation between final inertia and FPR: {pearson_corr:.4f}")
+    # print("Best FPR:", min(metric_value))
+
+    #
+    # # for supervised in [True, False]:
+    # #     if supervised:
+    # #        upper_bound = entropy(
+    # #         p=torch.bincount(errors) / errors.size(0)
+    # #         ).item()
+    # #     else:
+    # #         upper_bound = entropy(
+    # #         p=torch.ones((probits.size(0), ), device=probits.device) / probits.size(0)
+    # #         ).item()
+
+
+
+
+    # plot_num_samples_per_cluster(
+    #     trajectory_clusters=quantizer.results.list_clusters_res,
+    #     save_folder=save_folder,
+    #     suffix=suffix,
+    #     n_cluster=n_clusters,
+    #     start=0
+    # )
+
+
+
+
+    # plot_dead_resp(
+    #         list_resp_dead=results.list_resp_dead,
+    #         save_folder=save_folder,
+    #         suffix=suffix
+    #     )
+    
+        
+    # plot_mutual_info(
+    #     mutinfo_res_list=model.results.mutinfo_res_decomp_history,
+    #     save_folder=save_folder,
+    #     dataset="res",
+    #     supervised=True,
+    #     suffix= "decomp" + suffix ,
+    # )
+
+    # mapping_sup_clusters = reorder_by_error_threshold(
+    #     detector_labels=errors,   # (n,) in {0,1} or [0,1]
+    #     clusters=clusters,          # (n,) long in [0, k-1]
+    #     n_cluster=n_clusters,                               # int or 0-dim tensor
+    #     tau=0.00000000000001,               # gap tolerance on means
+    # )
+    # clusters_cal = model.predict(cal_probits).squeeze(0).to(torch.long)
+    # for tau in [0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.1]:
+    #     print("\nMerging with tau =", tau)
+    
+    #     means, upper_original, counts = get_clusters_info_2(cal_errors, clusters_cal, torch.tensor(n_clusters, device=device), bound=bound)
+    #     mask = counts[0] > 0
+    #     # print("mask shape:", mask.shape)
+    #     # print('maslk:', mask)
+    #     order_mean = torch.argsort(means.squeeze(0))  # ascending by mean error
+        
+
+    #     sorted_means = means.squeeze(0)[order_mean].tolist()
+    #     sorted_upper = upper_original.squeeze(0)[order_mean].tolist()
+    #     sorted_counts = counts.squeeze(0)[order_mean].tolist()
+    #     # str_print = ["{mean:.6f} ({count}), U:{upper:.6f}".format(mean=m, count=c, upper=u) for m, c, u in zip(sorted_means, sorted_counts, sorted_upper)]
+                    
+    #     # print("Clusters (mean (count), U):", ", ".join(str_print))
+    #     upper_original = upper_original.squeeze(0)  # shape (n_clusters,)
+    #     order = torch.argsort(upper_original)  # ascending by upper bound
+    #     mapping_sup_clusters = torch.full((n_clusters,), -1, device=device, dtype=torch.long)
+
+    #     current_group = -1
+    #     prev_val = None
+    #     for cid in order.tolist():
+    #         if not bool(mask[cid].item()):
+    #             continue                     # leave empty clusters for the post-pass
+    #         u = float(upper_original[cid])
+    #         if (prev_val is None) or (u - prev_val > tau):
+    #             current_group += 1
+    #         mapping_sup_clusters[cid] = current_group
+    #         prev_val = u
+        
+    #     if (~mask).any() and current_group >= 0:
+    #     # find the non-empty cluster with the smallest upper bound → its group id
+    #         highest_nonempty_cid = torch.argmax(upper_original.masked_fill(~mask, -float('inf')))
+    #         lowest_gid = mapping_sup_clusters[highest_nonempty_cid].item()
+    #         mapping_sup_clusters[~mask] = lowest_gid  # join empties to the safest group
+
+    #     # --- determine merged k and guard against the "all empty" corner case ---
+    #     if current_group < 0:
+    #         # no non-empty clusters: fall back to a single group 0
+    #         mapping_sup_clusters.fill_(0)
+    #         k_merged = 1
+    #     else:
+    #         k_merged = int(mapping_sup_clusters.max().item()) + 1
+
+    #     print("k (before):", n_clusters, "  k (after merge):", k_merged)
+
+    #     # --- relabel calibration and recompute bounds with the merged labels ---
+        
+    #     new_clusters_cal = mapping_sup_clusters[clusters_cal]                  # fancy indexing
+    #     _, upper = get_clusters_info(cal_errors, new_clusters_cal, torch.tensor(k_merged, device=device), bound=bound)
+    #     upper = upper.squeeze(0)                                              # now shape (k_merged,)
+
+    #     # --- relabel test and score with merged bounds ---
+    #     clusters_test = model.predict(test_probits).squeeze(0).to(torch.long)
+    #     # print("ok")
+    #     # exit()
+    #     new_clusters_test = mapping_sup_clusters[clusters_test]
+    #     preds_test = upper.gather(0, new_clusters_test)    
+
+    #     fpr_test, tpr_test, thr_test, auroc_test, accuracy_test, aurc_value_test, aupr_err_test, aupr_success_test = compute_all_metrics(
+    #     conf=preds_test.cpu(),
+    #     detector_labels=test_errors.cpu(),
+    # )
+
+    #     results_test = pd.DataFrame([{
+    #     "fpr": fpr_test,
+    #     "tpr": tpr_test,
+    #     "thr": thr_test,
+    #     "roc_auc": auroc_test,
+    #     "model_acc": accuracy_test,
+    #     "aurc": aurc_value_test,
+    #     "aupr_err": aupr_err_test,
+    #     "aupr_success": aupr_success_test,
+    # }])
+    #     print(results_test)
+
+

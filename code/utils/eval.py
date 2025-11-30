@@ -455,7 +455,7 @@ class AblationDetector:
         device: torch.device,
         suffix = "train",
         latent_path=None,
-        method_name="clustering",
+        postprocessor_name="clustering",
         cfg_dataset=None,
 
     ):
@@ -473,7 +473,7 @@ class AblationDetector:
         self.loader = dataloader
         self.device = device
         self.suffix = suffix
-        self.method_name = method_name
+        self.postprocessor_name = postprocessor_name
         
         self.cfg_dataset = cfg_dataset
         self.num_classes = cfg_dataset["num_classes"]
@@ -524,13 +524,13 @@ class AblationDetector:
             all_model_preds  = pkg["model_preds"].numpy()             # (N,)
             detector_labels_arr = (all_model_preds != all_labels)  # bool array
 
-            if self.method_name in ["gini", "max_proba", "metric_learning"]:
+            if self.postprocessor_name in ["doctor", "odin", "relu"]:
 
                 self.model.to(self.device)
                 self.model.eval()
                 all_scores = [np.zeros(n_samples, dtype=float) for _ in range(n_det)]
                 for idx, dec in tqdm(enumerate(detectors), total=len(detectors), desc="Getting Detectors Scores", leave=False):
-                    magnitude = list_configs[idx][self.method_name]['magnitude']
+                    magnitude = list_configs[idx]['magnitude']
                     
                     if magnitude > 0:
                         
@@ -588,8 +588,8 @@ class AblationDetector:
                 # now each detector
                 for i, det in enumerate(detectors):
                     # -- optionally craft 1‑step adv example per detector
-                    if self.method_name in ["gini", "max_proba", "metric_learning"]:
-                        magnitude = list_configs[i][self.method_name]['magnitude']
+                    if self.postprocessor_name in ["doctor", "odin", "relu"]:
+                        magnitude = list_configs[i]['magnitude']
                         if magnitude > 0:
                             scores = self.get_pertubated_scores(inputs, det, magnitude)
                         else:
@@ -668,24 +668,16 @@ class AblationDetector:
         list_results = []
         for i, scores in enumerate(all_scores):
         
-            fpr, tpr, thr, auroc, accuracy, aurc_value, aupr_err, aupr_success = compute_all_metrics(
+            results = compute_all_metrics(
                 conf=scores,
                 detector_labels=detector_labels,
             )
-        
-            results = pd.DataFrame([{
-                "fpr": fpr,
-                "tpr": tpr,
-                "thr": thr,
-                "roc_auc": auroc,
-                "model_acc": accuracy,
-                "aurc": aurc_value,
-                "aupr_err": aupr_err,
-                "aupr_success": aupr_success,
-            }])
+            
+            results = pd.DataFrame([results])
             
             suffix = suffix if suffix is not None else self.suffix
             results.columns = [f"{col}_{suffix}" for col in results.columns]
+            
             
             # config = _prepare_config_for_results(list_configs[i])
             # config = pd.json_normalize(config, sep="_")
