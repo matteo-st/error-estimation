@@ -201,9 +201,15 @@ def pretty_name(name: str) -> str:
         "densenet121": "DenseNet-121",
         "timm_vit_base16": "ViT-B/16",
         "timm_vit_tiny16": "ViT-Tiny/16",
+        "timm-vit-base16": "ViT-B/16",
+        "timm-vit-tiny16": "ViT-Tiny/16",
+        # --- Methods ---
+        "soft-kmeans_torch": "Soft KMeans",
+        "kmeans": "KMeans",
         # --- Metrics (val_cross variants etc.) ---
         "aupr_val_cross": "AUPR",
         "auroc_val_cross": "AUROC",
+        "roc_auc_test": "AUROC Test",
         "fpr_val_cross": "FPR@95",
         "fpr_val": "FPR@95",
         "fpr_test": "FPR@95",

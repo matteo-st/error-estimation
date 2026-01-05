@@ -457,6 +457,7 @@ class AblationDetector:
         latent_path=None,
         postprocessor_name="clustering",
         cfg_dataset=None,
+        result_folder=None,
 
     ):
         """
@@ -481,6 +482,7 @@ class AblationDetector:
     
         self.scores = None  # Precomputed scores, if any
         self.latent_path = latent_path
+        self.result_folder = result_folder
 
     def get_pertubated_scores(self, inputs, detector, magnitude):
 
@@ -671,6 +673,7 @@ class AblationDetector:
             results = compute_all_metrics(
                 conf=scores,
                 detector_labels=detector_labels,
+                result_folder=self.result_folder,
             )
             
             results = pd.DataFrame([results])

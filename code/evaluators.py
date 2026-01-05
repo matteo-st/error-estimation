@@ -42,6 +42,7 @@ class EvaluatorAblation:
             var_ablation=None,
             seed_split=0,
             verbose = True,
+            mode="search",
             ):
 
         """
@@ -57,6 +58,7 @@ class EvaluatorAblation:
         self.seed_split = seed_split
         self.n_cal = cfg_dataset["n_samples"]["cal"] if n_cal is None else n_cal
         self.fixed_var_ablation = var_ablation
+        self.fit_after_cv = cfg_detection.get("experience_args", {}).get("fit_after_cv", False)
         # self.is_relu = is_relu
         self.postprocessor_name = cfg_detection["name"]
         self.verbose = verbose
@@ -77,13 +79,24 @@ class EvaluatorAblation:
             self.model, self.cal_loader, device=self.device, suffix="cal", latent_path=self.latent_paths["cal"],
             cfg_dataset=self.cfg_dataset, postprocessor_name=self.postprocessor_name
         )
+
+
         self.evaluator_test = AblationDetector(
             self.model, self.val_loader, device=self.device, suffix="test", latent_path=self.latent_paths["test"],
-            cfg_dataset=self.cfg_dataset, postprocessor_name=self.postprocessor_name
+            cfg_dataset=self.cfg_dataset, postprocessor_name=self.postprocessor_name,
+            result_folder=self.result_folder
         )
 
         self.detector = None
         self.values = {"res": None, "cal": None}
+        self.mode = mode
+        self.n_folds = self.cfg_detection.get("experience_args", {}).get("n_folds", 5)
+        self.fit_after_cv = self.cfg_detection.get("experience_args", {}).get("fit_after_cv", False)
+        self.ratio_res_split = self.cfg_detection.get("experience_args", {}).get("ratio_res_split", None)
+        self.n_split_val = self.cfg_detection.get("experience_args", {}).get("n_split_val", 1)
+        self.weight_std = self.cfg_detection.get("experience_args", {}).get("weight_std", 0.0)
+        self.calibrate = self.cfg_detection.get("postprocessor_args", {}).get("calibrate", False)
+        self.hyperparam_combination = list(make_grid(self.cfg_detection, key ="postprocessor_grid")) 
         # self.run()
 
    
@@ -357,7 +370,9 @@ class EvaluatorAblation:
                 )
 
                     best_init = int(np.argmax(metrics[self.quantizer_metric]) if self.metric_direction == "max" else np.argmin(metrics[self.quantizer_metric])) 
-                self.detector.clustering_algo.best_init = best_init
+                if hasattr(self.detector, "clustering_algo"):
+                    
+                    self.detector.clustering_algo.best_init = best_init
             print("Fitting confidence intervals on calibration data")
             t0 = time.time()
             self.detector.fit(
@@ -379,75 +394,80 @@ class EvaluatorAblation:
 
         if self.verbose:
             print("Collecting values on res/cal data")
-            t0 = time.time()
+        t0 = time.time()
         self.get_values(self.res_loader, name="res")
         self.get_values(self.cal_loader)
         # self.get_values(self.calib_loader, calib=True)
+        t1 = time.time()
         if self.verbose:
-            t1 = time.time()
             print(f"Total time: {t1 - t0:.2f} seconds")
 
+       
+        self.detectors = [get_postprocessor(
+                postprocessor_name=self.postprocessor_name, 
+                model=self.model, 
+                cfg=cfg, 
+                result_folder=self.result_folder,
+                device=self.device
+                ) for cfg in self.hyperparam_combination]
+       
+        
+     
 
-        self.get_detector()
-
-        if self.postprocessor_name == "clustering":
-            self.fit_clustering()
-        elif self.postprocessor_name == "relu":
+        if self.postprocessor_name in ["partition", "clustering"]:
+            for dec in self.detectors:
+                dec.fit(
+                    logits=self.values["cal"]["logits"].to(dec.device),
+                    detector_labels=self.values["cal"]["detector_labels"].to(dec.device),
+                    dataloader=self.cal_loader,
+                    fit_clustering=True
+                )
+            
+                # self.fit_clustering()
+        elif self.postprocessor_name in ["relu", "random_forest", "scikit", "mlp" ]:
             self.detector.fit(
                 logits=self.values["cal"]["logits"].to(self.detector.device),
                 detector_labels=self.values["cal"]["detector_labels"].to(self.detector.device),
             )
+        elif self.postprocessor_name == "conformal":
+            
+            self.detector.fit(
+                logits=self.values["cal"]["logits"].to(self.detector.device),
+                targets=self.values["cal"]["targets"].to(self.detector.device),
+            )
+
         else:
             if self.verbose:
                 print('No fitting required for this method')
 
-  
+        
+        self.cal_results = self.evaluator_cal.evaluate(self.hyperparam_combination, self.detectors)
+        self.cal_results = pd.concat(self.cal_results, axis=0)
+
+        if self.verbose:
+            print("Evaluating best detector on validation data")
         t0 = time.time()
-        self.hyperparam_combination = list(make_grid(self.cfg_detection, key ="ablation_args"))
-        self.val_results = self.evaluator_test.evaluate(self.hyperparam_combination, [self.detector])
+        self.test_results = self.evaluator_test.evaluate(self.hyperparam_combination, self.detectors)
+        self.test_results = pd.concat(self.test_results, axis=0)
         t1 = time.time()
-        print(f"Val result ({self.metric}): {self.val_results[f'{self.metric}_test'].values}")
+        if self.verbose:
+            print(f"Total time: {t1 - t0:.2f} seconds")
 
 
-        # print("Evaluating best detector on training data")
-        # self.cal_results = self.evaluator_cal.evaluate([self.cfg_detection["postprocessor_args"]], [self.detector])[0]
-        # print(f"Train result ({self.metric}): {self.cal_results[f'{self.metric}_cal'].values}")
-
-        # print("Evaluating best detector on validation data")
-        # t0 = time.time()
-        # self.val_results = self.evaluator_test.evaluate([self.cfg_detection["postprocessor_args"]], [self.detector])
-        # t1 = time.time()
-        # print(f"Val result ({self.metric}): {self.val_results[f'{self.metric}_test'].values}")
-        # print(f"Total time: {t1 - t0:.2f} seconds")
- 
-
-        # if self.fixed_var_ablation is None:
-        #     file = "results.csv"
-        # else:
-        #     file = f"results_{self.fixed_var_ablation}.csv"
-
-        # self.save_results(
-        #     result_file=os.path.join(self.result_folder, file),
-        #     results=pd.merge(
-        #         self.cal_results, 
-        #         self.val_results,
-        #         how="outer")
-                    
-        #     )
+        result_file = f"results_opt-{self.metric}_qunatiz-metric-{self.quantizer_metric}-ratio-{self.ratio_res_split}_n-split-val-{self.n_split_val}_weight-std-{self.weight_std}_mode-{self.mode}.csv"
+        self.save_results(
+            result_file=os.path.join(self.result_folder, result_file),
+            results=pd.merge(
+                self.cal_results, 
+                self.test_results,
+                how="outer")               
+            )
 
 
 class HyperparamsSearch(EvaluatorAblation):
-    def __init__(self, mode="search", **kwargs):
+    def __init__(self, **kwargs):
         super().__init__(**kwargs)
     
-        self.mode = mode
-        self.n_folds = self.cfg_detection.get("experience_args", {}).get("n_folds", 5)
-        self.fit_after_cv = self.cfg_detection.get("experience_args", {}).get("fit_after_cv", False)
-        self.ratio_res_split = self.cfg_detection.get("experience_args", {}).get("ratio_res_split", None)
-        self.n_split_val = self.cfg_detection.get("experience_args", {}).get("n_split_val", 1)
-        self.weight_std = self.cfg_detection.get("experience_args", {}).get("weight_std", 0.0)
-        self.calibrate = self.cfg_detection.get("postprocessor_args", {}).get("calibrate", False)
-
 
     def search_no_fit(self):
 
@@ -775,12 +795,13 @@ class HyperparamsSearch(EvaluatorAblation):
                         detector_labels=detector_labels.cpu().numpy(),
                     )
                     results = pd.DataFrame(results)
+                    
                     if self.quantizer_metric == "likelihood":
                 # for likelihood, we want to maximize it
                         best_init = torch.argmax(dec.clustering_algo.results.lower_bound).item()
                     else:
 
-                        best_init = int(np.argmax(metrics[self.metric]) if self.metric_direction == "max" else np.argmin(metrics[self.metric])) 
+                        best_init = int(np.argmax(results[self.metric]) if self.metric_direction == "max" else np.argmin(results[self.metric])) 
                     # dec.clustering_algo.best_init = best_init
                     results = results.iloc[best_init].to_dict()
                     [metrics[key].append(results[key]) for key in results.keys()]
@@ -810,9 +831,10 @@ class HyperparamsSearch(EvaluatorAblation):
         # self.cal_results = self.best_result
 
         self.save_results(
-            result_file=os.path.join(self.result_folder, f"hyperparams_results_opt-{self.metric}_qunatiz-metric-{self.quantizer_metric}-ratio-{self.ratio_res_split}_n-split-val-{self.n_split_val}_weight-std-{self.weight_std}_mode-{self.mode}.csv"),
+            result_file=os.path.join(self.result_folder, f"hyperparams_results_opt-{self.metric}_qunatiz-metric-{self.quantizer_metric}-ratio-{self.ratio_res_split}_n-split-val-{self.n_split_val}_weight-std-{self.weight_std}_mode-{self.mode}_n-folds-{self.n_folds}.csv"),
             results=hyperparam_results
             )
+    
 
 
     def run(self):

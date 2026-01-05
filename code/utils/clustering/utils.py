@@ -486,7 +486,7 @@ def get_clusters_info_2(detector_labels: torch.Tensor, clusters: torch.Tensor, k
         return means, upper, counts
 
 
-def get_clusters_info(detector_labels: torch.Tensor, clusters: torch.Tensor, k: torch.Tensor, alpha=0.05, bound="hoeffding"):
+def get_clusters_info(detector_labels: torch.Tensor, clusters: torch.Tensor, k: torch.Tensor, alpha=0.05, bound="hoeffding", return_lb=False):
         """
         detector_labels: (n,) in {0,1} (or [0,1] probs)
         clusters:        (bs, n) long in [0, k_b-1] per batch
@@ -559,6 +559,8 @@ def get_clusters_info(detector_labels: torch.Tensor, clusters: torch.Tensor, k: 
             vars_[mask]  = 0.0
             lower[mask]  = 0.0
             upper[mask]  = 1.0
+        if return_lb:
+            return means, lower, upper
         return means, upper
 
 def plot_cluster_sizes(
@@ -775,7 +777,7 @@ def plot_cov_trajectory_vs_alpha(sigmas_list=None, precisions_list=None, save_fo
    
 #     return probits[:n_samples], all_detector_labels[:n_samples]
 
-def read_probits(latent_path, n_samples=None, order=True, subclasses=None, temperature=2.0, space="probits"):
+def read_probits(latent_path, n_samples=None, order=True, subclasses=None, temperature=2.0, space="probits", n_dim=None):
     pkg = torch.load(latent_path, map_location="cpu")
     all_logits = pkg["logits"].to(torch.float32)        # (N, C)
     all_labels = pkg["labels"]              # (N,)
@@ -800,6 +802,9 @@ def read_probits(latent_path, n_samples=None, order=True, subclasses=None, tempe
     probits = all_logits
     if order:
         probits = probits.sort(dim=1, descending=True)[0]
+
+    if n_dim is not None:
+        probits = probits[:, :n_dim]
 
     if n_samples is None:
         return probits, all_detector_labels

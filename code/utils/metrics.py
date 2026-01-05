@@ -1,6 +1,8 @@
 
 from sklearn import metrics
 import numpy as np
+import torch
+import os
 
 LIST_METRICS = ['fpr', 'tpr', 'thr', 'roc_auc', 'accuracy', 'aurc', 'aupr_in', 'aupr_out']
 
@@ -13,7 +15,7 @@ def fpr_at_fixed_tpr(fprs, tprs, thresholds, tpr_level: float = 0.95):
         idx = 0
     return fprs[idx], tprs[idx], thresholds[idx]
 
-def auc_and_fpr_recall(conf, label, tpr_level: float = 0.95):
+def auc_and_fpr_recall(conf, label, tpr_level: float = 0.95, result_folder=None):
     # following convention in ML we treat OOD as positive
 
 
@@ -22,6 +24,18 @@ def auc_and_fpr_recall(conf, label, tpr_level: float = 0.95):
     # therefore here we need to negate the "conf" values
 
     fprs, tprs, thresholds = metrics.roc_curve(label, conf)
+    if result_folder is not None:
+        # save ROC curve data
+        torch.save(
+            {
+                "fpr": torch.from_numpy(fprs).float(),
+                "tpr": torch.from_numpy(tprs).float(),
+                "thresholds": torch.from_numpy(thresholds).float()
+            },
+            os.path.join(result_folder, "roc_curve_data.pt")   
+            )
+        
+    
     fpr, tpr, thr = fpr_at_fixed_tpr(fprs, tprs, thresholds, tpr_level)
 
     auroc = metrics.auc(fprs, tprs)
@@ -40,7 +54,7 @@ def auc_and_fpr_recall(conf, label, tpr_level: float = 0.95):
 #     aurc_value = aurc(detector_labels, conf)
 
 #     return fpr, tpr, thr, auroc, accuracy, aurc_value, aupr_in, aupr_out
-def compute_all_metrics(conf, detector_labels,  n_split = 0, weight_std=0, tpr_level: float = 0.95):
+def compute_all_metrics(conf, detector_labels,  n_split = 0, weight_std=0, tpr_level: float = 0.95, result_folder=None):
     n = conf.shape[-1]
     if n_split > 1:
         n_samples_per_split = n // n_split
@@ -59,6 +73,7 @@ def compute_all_metrics(conf, detector_labels,  n_split = 0, weight_std=0, tpr_l
             res_m = _compute_all_metrics(
                 conf=scores_split,
                 detector_labels=errors_split,
+                result_folder=result_folder
             )
             results_splits.append(res_m)
 
@@ -83,23 +98,25 @@ def compute_all_metrics(conf, detector_labels,  n_split = 0, weight_std=0, tpr_l
         results = _compute_all_metrics(
         conf=conf,
         detector_labels=detector_labels,
+        result_folder=result_folder
     )
         # print("fpr shape:", np.shape(fpr))
     return results
 
 
-def _compute_all_metrics(conf, detector_labels, tpr_level: float = 0.95):
+def _compute_all_metrics(conf, detector_labels, tpr_level: float = 0.95, result_folder=None):
     """
     conf: np.ndarray of shape (N,) or (H, N)
     detector_labels: np.ndarray of shape (N,)
     returns 8-tuple; for batched conf, each item is (H,)
     """
+    # print('result_folder in compute_all_metrics:', result_folder)
     conf = np.asarray(conf)
     y = np.asarray(detector_labels).astype(int)
 
     # Scalar case: keep behavior identical
     if conf.ndim == 1:
-        auroc, aupr_in, aupr_out, fpr, tpr, thr = auc_and_fpr_recall(conf, y, tpr_level)
+        auroc, aupr_in, aupr_out, fpr, tpr, thr = auc_and_fpr_recall(conf, y, tpr_level, result_folder=result_folder)
         accuracy = float(y.mean())
         aurc_value = aurc(y, conf)
         results = {"fpr": fpr, "tpr": tpr, "thr": thr, "roc_auc": auroc,
@@ -129,7 +146,7 @@ def _compute_all_metrics(conf, detector_labels, tpr_level: float = 0.95):
     results["accuracy"] = [y.mean()] * H  # same for all rows
 
     for h in range(H):
-        a, ain, aout, f, t, th = auc_and_fpr_recall(conf[h], y, tpr_level)
+        a, ain, aout, f, t, th = auc_and_fpr_recall(conf[h], y, tpr_level, result_folder=result_folder)
         results["fpr"].append(f)
         results["tpr"].append(t)
         results["thr"].append(th)

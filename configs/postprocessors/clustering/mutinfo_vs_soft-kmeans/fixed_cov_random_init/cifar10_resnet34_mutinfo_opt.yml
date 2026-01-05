@@ -14,10 +14,14 @@ postprocessor_args:
   cov_type: diag
   init_scheme: random
   n_init: 1
-  max_iter: 20000
-  clustering_seed: 2
+  max_iter: 50
+  clustering_seed: 1
   lr: 0.0001
-  sig: 0.001
+  sig: 0.05
+  with_logdet: False
+  cov_proj_type: squared_clamp_min
+  alpha: 0.1
+  mutual_computation: decomposed
   
 experience_args:
   n_folds: None

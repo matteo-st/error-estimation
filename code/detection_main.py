@@ -119,6 +119,7 @@ def main(seed_split):
         "test": os.path.join(latent_dir, f"test_n-samples-{data_cfg['n_samples']['test']}.pt"),
     }   
     root_dir = os.path.join(args.root_dir, f"seed-split-{seed_split}")
+    os.makedirs(root_dir, exist_ok=True)
     if args.mode == "search_res":
         cfg_detection["experience_args"]["ratio_res_split"] = 1.0
     
