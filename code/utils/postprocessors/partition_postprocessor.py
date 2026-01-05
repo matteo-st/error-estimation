@@ -6,6 +6,7 @@ import torch
 from .base_postprocessor import BasePostprocessor
 from code.utils.clustering.kmeans import KMeans as TorchKMeans
 from code.utils.clustering.my_soft_kmeans import SoftKMeans as TorchSoftKMeans
+from code.utils.clustering import TreeQuantizer
 from code.utils.clustering.mutinfo_optimizer import MutInfoOptimizer
 from code.utils.clustering.divergences import (
     euclidean,
@@ -43,6 +44,7 @@ class PartitionPostprocessor(BasePostprocessor):
         ## Meta Parameters
         self.alpha = cfg["alpha"]
         self.method = cfg["method"]
+        
         self.bound = cfg["bound"]
         self.n_classes = cfg["n_classes"]
         self.class_subset = torch.tensor(class_subset, dtype=torch.long) if class_subset is not None else None
@@ -50,6 +52,7 @@ class PartitionPostprocessor(BasePostprocessor):
         ## Quantizer Space
         self.quantiz_space = cfg["space"]
         self.reorder_embs = cfg["reorder_embs"]
+        self.n_dim = cfg.get("n_dim", None)
         self.temperature = cfg["temperature"]
         self.normalize_gini = False
         self.pred_weight = cfg["pred_weights"]
@@ -68,6 +71,7 @@ class PartitionPostprocessor(BasePostprocessor):
         self.cov_proj_type = cfg.get("cov_proj_type", None)
         self.alpha = cfg.get("alpha", None)
         self.mutual_computation = cfg.get("mutual_computation", None)
+        self.score = cfg.get("score", "upper")
 
         ### Bregman Divergence Parameters
         self.divergence = None
@@ -123,8 +127,20 @@ class PartitionPostprocessor(BasePostprocessor):
                 mutual_computation=self.mutual_computation,
             )
         # elif self.method == "tim_gd":
+        elif self.method == "decision-tree":
+            self.clustering_algo = TreeQuantizer(
+                seed=self.quantiz_seed,
+                verbose=0, 
+                n_clusters=self.n_clusters,
+                splitter="best",
+                max_depth=None,
+                class_weight="balanced",
+                device=self.device,
+            
+            )
 
-
+        elif self.method in ["unif-width", "unif-mass"]:
+            pass
         else:
             raise ValueError(f"Unsupported method: {self.method}")
         pass
@@ -146,10 +162,16 @@ class PartitionPostprocessor(BasePostprocessor):
                 logits = logits[:, self.class_subset]
             if self.quantiz_space == "gini":
                 embs = gini(logits, temperature=self.temperature, normalize=self.normalize_gini)
+                return embs
             elif self.quantiz_space == "probits":
                 embs = torch.softmax(logits / self.temperature, dim=1)
             elif self.quantiz_space == "logits":
                 embs = logits
+            elif self.quantiz_space == "max_proba":
+                probs = torch.softmax(logits / self.temperature, dim=1)
+                embs, _ = torch.max(probs, dim=1)
+
+                return embs
         else:
             self.model.to(self.device)
             logits = self.model(x)
@@ -179,6 +201,9 @@ class PartitionPostprocessor(BasePostprocessor):
             # embs = embs[idx]                   # apply σ to rows
             # self._perm_idx = idx                        # save σ for later
 
+        if self.n_dim is not None:
+            embs = embs[:, :self.n_dim]
+
         if self.pred_weight is not None:
             if self.pred_weight > 0:
                 preds = torch.argmax(logits, dim=1)
@@ -193,10 +218,17 @@ class PartitionPostprocessor(BasePostprocessor):
 
         embs = self._extract_embeddings(x, logits)
 
-        if self.method == "uniform":
-            cluster = torch.floor(embs * self.n_cluster).long()
-            cluster[cluster == self.n_cluster] = self.n_cluster - 1 # Handle edge case when proba_error == 1
+        if self.method == "unif-width":
+            cluster = torch.floor(embs * self.n_clusters).long()
+            cluster[cluster == self.n_clusters] = self.n_clusters - 1 # Handle edge case when proba_error == 1
             return cluster
+        elif self.method == "unif-mass":
+
+            bin_edges = self.bin_edges.to(embs.device)
+            # bucketize returns integers in [0, n_clusters-1]
+            cluster = torch.bucketize(embs, bin_edges)
+            return cluster  # (N,)
+
         
         else:
             if self.reducer is not None:
@@ -230,55 +262,60 @@ class PartitionPostprocessor(BasePostprocessor):
             joblib.dump(self.clustering_algo, os.path.join(experiment_folder, 'clustering_algo.pkl'))
         # else:
         #     raise ValueError("Unsupported method")
+    def fit_quantizer(self, all_embs,  detector_labels, logits=None):
+        if self.method in ["kmeans_torch", "soft-kmeans_torch"]:
+            all_embs = all_embs.to(self.device)
+            #print("All embs shape", all_embs.shape)
+            clusters = self.clustering_algo.fit_predict(all_embs, self.n_clusters).squeeze(0)
+            self.n_iter = self.clustering_algo.n_iter
+
+        elif self.method == "mutinfo_opt":
+            clusters = self.clustering_algo.fit_predict(
+                probits=all_embs, 
+                errors=detector_labels
+                )  
+        
+            self.n_iter = self.clustering_algo.results.best_iter
+        elif self.method == "decision-tree":
+            clusters = self.clustering_algo.fit_predict(
+                x=all_embs, 
+                y=detector_labels
+                )  
+        elif self.method == "unif-width":
+            clusters = self.predict_clusters(logits=logits)
+        elif self.method == "unif-mass":
+             # internal quantiles: (n_clusters - 1) edges
+            q = torch.linspace(0.0, 1.0, self.n_clusters + 1, device=all_embs.device)[1:-1]
+            bin_edges = torch.quantile(all_embs, q)
+            self.bin_edges = bin_edges.detach().cpu()  # store on CPU
+            clusters = torch.bucketize(all_embs, self.bin_edges.to(all_embs.device))
+            clusters = clusters.to(self.device, dtype=torch.long)
+        else:
+            raise ValueError("Unsupported method")
+        return clusters
+        
 
     def fit(self, logits, detector_labels, dataloader=None, fit_clustering=True):
 
         all_embs = self._extract_embeddings(logits=logits)
-
-        if fit_clustering:
-            # print("Fitting clustering algorithm")
-
-            if self.method in ["kmeans_torch", "soft-kmeans_torch"]:
-                all_embs = all_embs.to(self.device)
-                #print("All embs shape", all_embs.shape)
-                clusters = self.clustering_algo.fit_predict(all_embs, self.n_clusters).squeeze(0)
-                #print("Fitted clusters shape", clusters.shape)
-                # exit()
-
-                # if self.method == "kmeans_torch":
-                #     self.inertia = self.clustering_algo.results.inertia
-                # else:
-                
-                #     self.lower_bound = self.clustering_algo.results.lower_bound
-                self.n_iter = self.clustering_algo.n_iter
-
-            elif self.method == "mutinfo_opt":
-                clusters = self.clustering_algo.fit_predict(
-                    probits=all_embs, 
-                    errors=detector_labels
-                    )  
-            
-                self.n_iter = self.clustering_algo.results.best_iter
     
-            else:
-                raise ValueError("Unsupported method")
-
-            # print("Iterations:", self.n_iter)
+        if fit_clustering:
+            clusters = self.fit_quantizer(all_embs=all_embs, detector_labels=detector_labels, logits=logits)
         else:
-           # print("Predicting clusters with existing clustering algorithm")
             clusters = self.predict_clusters(logits=logits)
             
-               
-
-        # print("n_iter", self.n_iter)
-        # print("inertia", self.inertia)
-
-        # print("inertia", self.inertia)
-        # print("clustres shape", clusters.shape)
-        # print("cluster [:3]", clusters[:3])
-
-        # self.clustering(detector_labels, clusters, k=self.list_n_cluster)
         self.clustering(detector_labels, clusters, k=torch.tensor([self.n_clusters]))
+
+        torch.save(
+            {
+                "cluster_counts": self.cluster_counts,
+                "cluster_error_means": self.cluster_error_means,
+                "cluster_error_vars": self.cluster_error_vars,
+                "cluster_intervals": self.cluster_intervals,
+            },
+            os.path.join(self.result_folder, f"partition_cluster_stats_n-clusters-{self.n_clusters}.pt"),
+        )
+
 
     #    # statistics = ((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)) # cifar10 resnet34
     #     statistics = ((0.5000, 0.5000, 0.5000), (0.5000, 0.5000, 0.5000)) # imagenet base
@@ -333,6 +370,8 @@ class PartitionPostprocessor(BasePostprocessor):
         C = clusters.to(device=device, dtype=torch.long)         # (bs, n)
         k = k.to(device=device, dtype=torch.long)               # (bs,)
         bs, n = C.shape
+
+
         assert y.numel() == n, "detector_labels must have same n as clusters"
 
         k_max = int(k.max().item())
@@ -409,16 +448,21 @@ class PartitionPostprocessor(BasePostprocessor):
         # (bs, Kmax) of upper bounds
         # upper = self.cluster_intervals[..., 1]  # take the upper bound
         # print("cluster shape in call", cluster.shape)
-
-        upper = self.cluster_intervals[..., 1].squeeze(0)  # take the upper bound
-        # print("upper shape in call", upper.shape)
-        # print('upper shape in call', upper.shape)
-
-        # preds = upper.gather(0, cluster) 
-        if cluster.dim() == 1:          # (bs,)
-            preds = upper.gather(0, cluster) # (bs,)  
+        if self.score == "upper":
+            scores = self.cluster_intervals[..., 1].squeeze(0).to(self.device)  # take the upper bound
+        elif self.score == "mean":
+            scores = self.cluster_error_means.squeeze(0).to(self.device)
         else:
-            preds = upper.gather(1, cluster)  
+            raise ValueError("Unsupported score type")
+        if cluster.dim() == 1:          # (bs,)
+            preds = scores.gather(0, cluster) # (bs,)  
+        else:
+            preds = scores.gather(1, cluster)  
+
+        torch.save(
+            cluster, os.path.join(self.result_folder, f"clusters_test_n-clusters-{self.n_clusters}.pt")
+        )
+
        # print("preds shape in call", preds.shape)   
 
         # Gather per batch along cluster index
@@ -429,5 +473,6 @@ class PartitionPostprocessor(BasePostprocessor):
 
        # # Optionally stick NaNs on invalid components (if ever present)
        # # preds = preds.masked_fill( ... , float('nan'))
-
-        return preds
+        if preds.dim() == 1:
+            return preds.unsqueeze(0)  # (bs, 1)
+        return preds  # (bs, 1) or (bs, n, 1)
